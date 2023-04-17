@@ -3,10 +3,9 @@
 
 #include "stdafx.h"
 #include "ffmpeg_DXVA_decoder.h"
-#include "ffmpeg_dxva2.h"
-#include "D3DVidRender.h"
 
 #define MAX_LOADSTRING 100
+//#define ENABLED_SAVE_FILE
 
 #pragma warning(disable : 4996)
 
@@ -111,6 +110,9 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
    HWND hWnd = CreateWindowW(szWindowClass, szTitle, WS_OVERLAPPEDWINDOW,
       CW_USEDEFAULT, 0, CW_USEDEFAULT, 0, nullptr, nullptr, hInstance, nullptr);
 
+//#define CreateWindowW(lpClassName, lpWindowName, dwStyle, x, y,\
+//nWidth, nHeight, hWndParent, hMenu, hInstance, lpParam)\
+
    if (!hWnd)
    {
       return FALSE;
@@ -198,8 +200,8 @@ INT_PTR CALLBACK About(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
     return (INT_PTR)FALSE;
 }
 
-
-CD3DVidRender m_D3DVidRender;
+//CD3DVidRender m_D3DVidRender;
+#if 0
 AVPixelFormat GetHwFormat(AVCodecContext *s, const AVPixelFormat *pix_fmts)
 {
 	InputStream* ist = (InputStream*)s->opaque;
@@ -207,232 +209,379 @@ AVPixelFormat GetHwFormat(AVCodecContext *s, const AVPixelFormat *pix_fmts)
 	ist->hwaccel_pix_fmt = AV_PIX_FMT_DXVA2_VLD;
 	return ist->hwaccel_pix_fmt;
 }
+#endif
+
+static AVBufferRef *hw_device_ctx = NULL;
+static enum AVPixelFormat hw_pix_fmt;
+
+static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
+	const enum AVPixelFormat *pix_fmts)
+{
+	const enum AVPixelFormat *p;
+
+	for (p = pix_fmts; *p != -1; p++) {
+		if (*p == hw_pix_fmt)
+			return *p;
+	}
+
+	fprintf(stderr, "Failed to get HW surface format.\n");
+	return AV_PIX_FMT_NONE;
+}
+static int hw_decoder_init(AVCodecContext *ctx, const enum AVHWDeviceType type)
+{
+	AVDictionary *opts = NULL;
+	int err = 0;
+
+	av_dict_set_int(&opts, "width", ctx->width, 0);
+	av_dict_set_int(&opts, "height", ctx->height, 0);
+	av_dict_set_int(&opts, "hwnd", (int64_t )g_hwWnd, 0);
+
+	if ((err = av_hwdevice_ctx_create(&hw_device_ctx, type,
+		NULL, opts, 0)) < 0) {
+		fprintf(stderr, "Failed to create specified HW device.\n");
+		av_dict_free(&opts);
+		return err;
+	}
+	ctx->hw_device_ctx = av_buffer_ref(hw_device_ctx);
+
+	av_dict_free(&opts);
+	return err;
+}
+
+static int set_hwframe_ctx(AVCodecContext *ctx, AVBufferRef *hw_device_ctx, enum AVPixelFormat hw_pix_fmt, enum AVPixelFormat sw_format, int width, int height)
+{
+	AVBufferRef *hw_frames_ref;
+	AVHWFramesContext *frames_ctx = NULL;
+	int err = 0;
+
+	if (!(hw_frames_ref = av_hwframe_ctx_alloc(hw_device_ctx))) {
+		fprintf(stderr, "Failed to create frame context.\n");
+		return -1;
+	}
+	frames_ctx = (AVHWFramesContext *)(hw_frames_ref->data);
+	frames_ctx->format = hw_pix_fmt;
+	frames_ctx->sw_format = sw_format;
+	frames_ctx->width = width;
+	frames_ctx->height = height;
+	frames_ctx->initial_pool_size = 20;
+
+	if ((err = av_hwframe_ctx_init(hw_frames_ref)) < 0) {
+		fprintf(stderr, "Failed to initialize frame context.");
+		av_buffer_unref(&hw_frames_ref);
+		return err;
+	}
+	ctx->hw_frames_ctx = av_buffer_ref(hw_frames_ref);
+	if (!ctx->hw_frames_ctx)
+		err = AVERROR(ENOMEM);
+
+	av_buffer_unref(&hw_frames_ref);
+	return err;
+}
+
+static void calculate_display_rect(RECT *rect,
+	int scr_xleft, int scr_ytop, int scr_width, int scr_height,
+	int pic_width, int pic_height, AVRational pic_sar)
+{
+	float aspect_ratio;
+	int width, height, x, y;
+
+	if (pic_sar.num == 0)
+		aspect_ratio = 0;
+	else
+		aspect_ratio = (float)av_q2d(pic_sar);
+
+	if (aspect_ratio <= 0.0)
+		aspect_ratio = 1.0;
+	aspect_ratio *= (float)pic_width / (float)pic_height;
+
+	/* XXX: we suppose the screen has a 1.0 pixel ratio */
+	height = scr_height;
+	width = lrint(height * aspect_ratio) & ~1;
+	if (width > scr_width) {
+		width = scr_width;
+		height = lrint(width / aspect_ratio) & ~1;
+	}
+	x = (scr_width - width) / 2;
+	y = (scr_height - height) / 2;
+	rect->left = scr_xleft + x;
+	rect->top = scr_ytop + y;
+	rect->right = rect->left + FFMAX(width, 1);
+	rect->bottom = rect->top + FFMAX(height, 1);
+}
+
+typedef struct DXVA2DevicePriv {
+	HMODULE d3dlib;
+	HMODULE dxva2lib;
+
+	HANDLE device_handle;
+
+	IDirect3D9       *d3d9;
+	IDirect3DDevice9 *d3d9device;
+} DXVA2DevicePriv;
+
+static IDirect3DSurface9 * m_pDirect3DSurfaceRender = NULL;
+static IDirect3DSurface9 * m_pBackBuffer = NULL;
+static CRITICAL_SECTION cs;
+static FILE *output_file = NULL;
+static int dxva2_retrieve_data(AVCodecContext *avctx, AVFrame *frame)
+{
+	AVHWDeviceContext  *device_ctx = (AVHWDeviceContext*)avctx->hw_device_ctx->data;
+	DXVA2DevicePriv    *priv = (DXVA2DevicePriv       *)device_ctx->user_opaque;
+	LPDIRECT3DSURFACE9 surface = (LPDIRECT3DSURFACE9)frame->data[3];
+	RECT m_rtViewport;
+	RECT rect = { 0 };
+
+	EnterCriticalSection(&cs);
+
+	IDirect3DDevice9Ex_Clear(priv->d3d9device, 0, NULL, D3DCLEAR_TARGET, D3DCOLOR_XRGB(0, 0, 0), 1.0f, 0);
+	IDirect3DDevice9Ex_BeginScene(priv->d3d9device);
+	if (m_pBackBuffer) {
+		IDirect3DSurface9_Release(m_pBackBuffer);
+		m_pBackBuffer = NULL;
+	}
+	IDirect3DDevice9Ex_GetBackBuffer(priv->d3d9device, 0, 0, D3DBACKBUFFER_TYPE_MONO, &m_pBackBuffer);
+
+	RECT SourceRect = { 0,0,((~0 - 1)&frame->width),((~0 - 1)&frame->height) };
+	IDirect3DDevice9Ex_StretchRect(priv->d3d9device, surface, &SourceRect, m_pBackBuffer, NULL, D3DTEXF_LINEAR);
+	//IDirect3DDevice9Ex_StretchRect(priv->d3d9device, surface, &SourceRect, m_pBackBuffer, NULL, D3DTEXF_POINT);
+	
+	IDirect3DDevice9Ex_EndScene(priv->d3d9device);
+	
+	GetClientRect(g_hwWnd, &m_rtViewport);
+#if 1
+	calculate_display_rect(&rect, m_rtViewport.left, m_rtViewport.top, m_rtViewport.right - m_rtViewport.left, m_rtViewport.bottom - m_rtViewport.top, frame->width, frame->height, frame->sample_aspect_ratio);
+	IDirect3DDevice9Ex_Present(priv->d3d9device, NULL, &rect, NULL, NULL);
+#else
+	IDirect3DDevice9Ex_Present(priv->d3d9device, NULL, &m_rtViewport, NULL, NULL);
+#endif
+
+	LeaveCriticalSection(&cs);
+
+	return 0;
+}
+
+static int decode_write(AVCodecContext *avctx, AVPacket *packet)
+{
+	AVFrame *frame = NULL;
+#ifdef ENABLED_SAVE_FILE
+	AVFrame *sw_frame = NULL;
+	uint8_t *buffer = NULL;
+	int size;
+#endif
+	int ret;
+
+	ret = avcodec_send_packet(avctx, packet);
+	if (ret < 0) {
+		fprintf(stderr, "Error during decoding\n");
+		//return ret;
+		return 0;
+	}
+
+	while (1) {
+		if (!(frame = av_frame_alloc())) {
+			fprintf(stderr, "Can not alloc frame\n");
+			ret = AVERROR(ENOMEM);
+			goto fail;
+		}
+
+#ifdef ENABLED_SAVE_FILE
+		if (!(sw_frame = av_frame_alloc())) {
+			fprintf(stderr, "Can not alloc frame\n");
+			ret = AVERROR(ENOMEM);
+			goto fail;
+		}
+#endif
+
+		ret = avcodec_receive_frame(avctx, frame);
+		if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+			av_frame_free(&frame);
+#ifdef ENABLED_SAVE_FILE
+			av_frame_free(&sw_frame);
+#endif
+			return 0;
+		}
+		else if (ret < 0) {
+			fprintf(stderr, "Error while decoding\n");
+			goto fail;
+		}
+
+#ifndef ENABLED_SAVE_FILE
+		if (frame->format == AV_PIX_FMT_DXVA2_VLD)
+			dxva2_retrieve_data(avctx, frame);
+
+		av_usleep(30000);
+#else
+		/* retrieve data from GPU to CPU */
+		if ((ret = av_hwframe_transfer_data(sw_frame, frame, 0)) < 0) {
+			fprintf(stderr, "Error transferring the data to system memory\n");
+			goto fail;
+		}
+
+		//const char *pf = av_get_pix_fmt_name((enum AVPixelFormat)sw_frame->format);
+		printf("Pixel format: %s\n", av_get_pix_fmt_name((enum AVPixelFormat)sw_frame->format));
+
+		size = av_image_get_buffer_size((enum AVPixelFormat)sw_frame->format, sw_frame->width,
+			sw_frame->height, 1);
+
+		buffer = (uint8_t *)av_malloc(size);
+		if (!buffer) {
+			fprintf(stderr, "Can not alloc buffer\n");
+			ret = AVERROR(ENOMEM);
+			goto fail;
+		}
+		ret = av_image_copy_to_buffer(buffer, size,
+			(const uint8_t * const *)sw_frame->data,
+			(const int *)sw_frame->linesize, (enum AVPixelFormat)sw_frame->format,
+			sw_frame->width, sw_frame->height, 1);
+		if (ret < 0) {
+			fprintf(stderr, "Can not copy image to buffer\n");
+			goto fail;
+		}
+
+		if ((ret = fwrite(buffer, 1, size, output_file)) < 0) {
+			fprintf(stderr, "Failed to dump raw data.\n");
+			goto fail;
+		}
+#endif
+
+	fail:
+		av_frame_free(&frame);
+#ifdef ENABLED_SAVE_FILE
+		av_frame_free(&sw_frame);
+		av_freep(&buffer);
+#endif
+		if (ret < 0)
+			return ret;
+	}
+}
 
 DWORD WINAPI ThreadProc(_In_ LPVOID lpParameter)
 {
-
-	//const char *filename = "H:\\work\\vc\\dfmirage\\ffmpeg64\\bin\\v1080.mp4";
-	const char *filename = "rtsp://192.168.1.64/channel0";
-
-	int setup_hwdecode = 0;
-
-	av_register_all();//注册解码器
-
 	AVFormatContext *fc = NULL;
-	int res = avformat_open_input(&fc, filename, NULL, NULL);//打开文件
-	if (res < 0) {
-		printf("error %x in avformat_open_input\n", res);
-		return 1;
+	AVPacket *packet = NULL;
+	AVCodecContext *codecctx;
+	const AVCodec *codec;
+	enum AVHWDeviceType type;
+	int ret, i, videoindex;
+
+	//const char *filename = "H:/BaiduNetdiskDownload/Android/01.mp4";
+	const char *filename = "H:/BaiduNetdiskDownload/Android/02.mp4";
+	//const char *filename = "rtsp://192.168.1.64:555/channel5";
+	
+#ifdef  ENABLED_SAVE_FILE
+	output_file = fopen("H:/BaiduNetdiskDownload/Android/02.nv12", "w+b");
+#endif //  ENABLED_SAVE_FILE
+
+
+	InitializeCriticalSection(&cs);
+
+	packet = av_packet_alloc();
+	if (!packet) {
+		fprintf(stderr, "Failed to allocate AVPacket\n");
+		exit(EXIT_FAILURE);
 	}
 
-	res = avformat_find_stream_info(fc, NULL);//取出流信息
-	if (res < 0)
-	{
-		printf("error %x in avformat_find_stream_info\n", res);
-		return 1;
+	ret = avformat_open_input(&fc, filename, NULL, NULL);//打开文件
+	if (ret < 0) {
+		printf("error %x in avformat_open_input\n", ret);
+		exit(EXIT_FAILURE);
 	}
+
+	ret = avformat_find_stream_info(fc, NULL);//取出流信息
+	if (ret < 0) {
+		printf("error %x in avformat_find_stream_info\n", ret);
+		exit(EXIT_FAILURE);
+	}
+
 	//查找视频流和音频流
 	av_dump_format(fc, 0, filename, 0);//列出输入文件的相关流信息
-	int i;
-	int videoindex = -1;
+
+	videoindex = -1;
 
 	for (i = 0; i < fc->nb_streams; i++)
 	{
-		if (fc->streams[i]->codec->codec_type == AVMEDIA_TYPE_VIDEO)
+		if (fc->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO)
 		{
 			videoindex = i;
 		}
 	}
-	if (videoindex == -1)
-	{
+	if (videoindex == -1) {
 		av_log(NULL, AV_LOG_DEBUG, "can't find video stream\n");
-		return 0;
+		exit(EXIT_FAILURE);
+	}
 
-	}//没有找到视频流 
-
-
-	AVCodec *codec = avcodec_find_decoder(fc->streams[videoindex]->codec->codec_id);	//根据流信息找到解码器
-	if (!codec)
-	{
+	codec = avcodec_find_decoder(fc->streams[videoindex]->codecpar->codec_id);	//根据流信息找到解码器
+	if (!codec) {
 		printf("decoder not found\n");
-		return 1;
+		exit(EXIT_FAILURE);
 	}
 
-	AVCodecContext *codecctx = fc->streams[videoindex]->codec;
+	codecctx = avcodec_alloc_context3(codec);
+	if (!codecctx) {
+		printf("codecctx not found\n");
+		exit(EXIT_FAILURE);
+	}
 
-	bool bAccel = true;
-	AVCodecContext *temp_codecctx = codecctx;
-	memcpy(temp_codecctx, codecctx, sizeof(codecctx));
+	if (avcodec_parameters_to_context(codecctx, fc->streams[videoindex]->codecpar) < 0)
+		exit(EXIT_FAILURE);
 
-	if (bAccel && codecctx->codec_type == AVMEDIA_TYPE_VIDEO)
-	{
-		switch (codec->id)
-		{
-		case AV_CODEC_ID_MPEG2VIDEO:
-		case AV_CODEC_ID_H264:
-		case AV_CODEC_ID_VC1:
-		case AV_CODEC_ID_WMV3:
-		case AV_CODEC_ID_HEVC:
-		case AV_CODEC_ID_VP9:
-		{
-#if 1
-			codecctx->thread_count = 1;  // Multithreading is apparently not compatible with hardware decoding
-			InputStream *ist = new InputStream();
-			ist->hwaccel_id = HWACCEL_AUTO;
-			ist->active_hwaccel_id = HWACCEL_AUTO;
-			ist->hwaccel_device = "dxva2";
-			ist->dec = codec;
-			ist->dec_ctx = codecctx;
+	type = av_hwdevice_find_type_by_name("dxva2");
+	if (type == AV_HWDEVICE_TYPE_NONE)
+		exit(EXIT_FAILURE);
 
-			if (codecctx->coded_width == 0 || codecctx->coded_height == 0)
-			{
-				codecctx->coded_width = codecctx->width;
-				codecctx->coded_height = codecctx->height;
-			}
-
-			codecctx->opaque = ist;
-			if (dxva2_init(codecctx, g_hwWnd) == 0)
-			{
-				codecctx->get_buffer2 = ist->hwaccel_get_buffer;
-				codecctx->get_format = GetHwFormat;
-				codecctx->thread_safe_callbacks = 1;
-
-				break;
-			}
-#endif
-			bAccel = false;
-			break;
+	for (i = 0;; i++) {
+		const AVCodecHWConfig *config = avcodec_get_hw_config(codec, i);
+		if (!config) {
+			fprintf(stderr, "Decoder %s does not support device type.\n",
+				codec->name);
+			exit(EXIT_FAILURE);
 		}
-		default:
-			bAccel = false;
+		if (config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX &&
+			config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_FRAMES_CTX &&
+			config->device_type == type) {
+			hw_pix_fmt = config->pix_fmt;
 			break;
 		}
 	}
 
-	AVFrame	*pFrameBGR = NULL;
-	uint8_t	*out_buffer = NULL;
-	struct SwsContext *img_convert_ctx = NULL;
-	if (!bAccel)
-	{
-		avcodec_close(codecctx);
-		codecctx = temp_codecctx;
+	codecctx->get_format = get_hw_format;
 
-		m_D3DVidRender.InitD3D_YUV(g_hwWnd, codecctx->width, codecctx->height);
+	if (hw_decoder_init(codecctx, type) < 0)
+		exit(EXIT_FAILURE);
 
-		pFrameBGR = av_frame_alloc();
-		out_buffer = (uint8_t *)av_malloc(av_image_get_buffer_size(AV_PIX_FMT_YUV420P, codecctx->width, codecctx->height, 1));
-		av_image_fill_arrays(pFrameBGR->data, ((AVPicture *)pFrameBGR)->linesize, out_buffer, AV_PIX_FMT_YUV420P, codecctx->width, codecctx->height, 1);
-		img_convert_ctx = sws_getContext(codecctx->width, codecctx->height, codecctx->pix_fmt, codecctx->width, codecctx->height, AV_PIX_FMT_YUV420P, SWS_BICUBIC, NULL, NULL, NULL);
+	codecctx->pix_fmt = hw_pix_fmt;
+
+	/* set hw_frames_ctx for encoder's AVCodecContext */
+	if ((ret = set_hwframe_ctx(codecctx, hw_device_ctx, hw_pix_fmt, AV_PIX_FMT_NV12, codecctx->width, codecctx->height)) < 0) {
+		fprintf(stderr, "Failed to set hw frame context.\n");
+		exit(EXIT_FAILURE);
 	}
 
-	res = avcodec_open2(codecctx, codec, NULL);
-	if (res < 0) {
-		printf("error %x in avcodec_open2\n", res);
-		return 1;
+	ret = avcodec_open2(codecctx, codec, NULL);
+	if (ret < 0) {
+		printf("error %x in avcodec_open2\n", ret);
+		exit(EXIT_FAILURE);
 	}
 
-	AVPacket pkt = { 0 };
-	AVFrame *picture = av_frame_alloc();
-	DWORD wait_for_keyframe = 60;
+	while (g_bDecodeThreadCanRun && ret >= 0) {
+		if ((ret = av_read_frame(fc, packet)) < 0)
+			break;
 
-	int ret;
-	int count = 0;
+		if (packet->stream_index == videoindex)
+			ret = decode_write(codecctx, packet);
 
-	while (g_bDecodeThreadCanRun && av_read_frame(fc, &pkt) == 0)
-	{
-		if (pkt.stream_index == videoindex)
-		{
-#if 1
-			ret = avcodec_send_packet(codecctx, &pkt);
-			if (ret < 0) {
-				fprintf(stderr, "Error during decoding\n");
-				av_packet_unref(&pkt);
-				continue;
-			}
-
-			while (1)
-			{
-				DWORD t_start = GetTickCount();
-				ret = avcodec_receive_frame(codecctx, picture);
-				if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
-					break;
-				}
-				else if (ret < 0) {
-					fprintf(stderr, "Error while decoding\n");
-					break;
-				}
-
-				if (bAccel)
-				{
-					//获取数据同时渲染
-					dxva2_retrieve_data_call(codecctx, picture);
-
-					DWORD t_end = GetTickCount();
-					printf("dxva2 time using: %lu\r\n", t_end - t_start);
-				}
-				else
-				{
-					if (img_convert_ctx &&pFrameBGR && out_buffer)
-					{
-						//转换数据并渲染
-						sws_scale(img_convert_ctx, (const uint8_t* const*)picture->data, picture->linesize, 0, codecctx->height, pFrameBGR->data, pFrameBGR->linesize);
-						m_D3DVidRender.Render_YUV(out_buffer, picture->width, picture->height);
-
-						DWORD t_end = GetTickCount();
-						printf("normal time using: %lu\n", t_end - t_start);
-					}
-				}
-
-				count++;
-
-			}
-
-#else
-			// RTSP流 出现花屏现象，建议使用上面的方法  （帧率太高也会花屏：估计和网络或者显卡性能有关）
-			int got_picture = 0;
-
-			DWORD t_start = GetTickCount();
-			int bytes_used = avcodec_decode_video2(codecctx, picture, &got_picture, &pkt);
-			if (got_picture)
-			{
-				if (bAccel)
-				{
-					//获取数据同时渲染
-					dxva2_retrieve_data_call(codecctx, picture);
-
-					DWORD t_end = GetTickCount();
-					printf("dxva2 time using: %lu\r\n", t_end - t_start);
-				}
-				else
-				{
-					if (img_convert_ctx &&pFrameBGR && out_buffer)
-					{
-						//转换数据并渲染
-						sws_scale(img_convert_ctx, (const uint8_t* const*)picture->data, picture->linesize, 0, codecctx->height, pFrameBGR->data, pFrameBGR->linesize);
-						m_D3DVidRender.Render_YUV(out_buffer, picture->width, picture->height);
-
-						DWORD t_end = GetTickCount();
-						printf("normal time using: %lu\n", t_end - t_start);
-					}
-				}
-
-				count++;
-			}
-			//Sleep(30u);
-#endif
-
-			av_packet_unref(&pkt);
-		}
-		else
-		{
-			av_packet_unref(&pkt);
-		}
+		av_packet_unref(packet);
 	}
 
-	av_free(picture);
+	ret = decode_write(codecctx, NULL);
 
+	av_packet_free(&packet);
 	avcodec_close(codecctx);
 	avformat_close_input(&fc);
+	if (output_file)
+		fclose(output_file);
+	DeleteCriticalSection(&cs);
 
+	exit(EXIT_SUCCESS);
 	return 0;
 }

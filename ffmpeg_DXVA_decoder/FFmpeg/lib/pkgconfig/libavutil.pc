@@ -1,0 +1,14 @@
+prefix=/i/github/FFmpeg/install/win/x86_x64/nv-10.1-qsv-vpl
+exec_prefix=${prefix}
+libdir=/i/github/FFmpeg/install/win/x86_x64/nv-10.1-qsv-vpl/lib
+includedir=/i/github/FFmpeg/install/win/x86_x64/nv-10.1-qsv-vpl/include
+
+Name: libavutil
+Description: FFmpeg utility library
+Version: 58.6.100
+Requires: 
+Requires.private: 
+Conflicts:
+Libs: -L${libdir}  -lavutil 
+Libs.private: -libpath:/i/github/FFmpeg/third/libvpl-msvc-x64/lib/pkgconfig/../ vpl.lib user32.lib bcrypt.lib
+Cflags: -I${includedir}

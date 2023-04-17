@@ -30,24 +30,12 @@
     <ClInclude Include="ffmpeg_DXVA_decoder.h">
       <Filter>头文件</Filter>
     </ClInclude>
-    <ClInclude Include="D3DVidRender.h">
-      <Filter>头文件</Filter>
-    </ClInclude>
-    <ClInclude Include="ffmpeg_dxva2.h">
-      <Filter>头文件</Filter>
-    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="stdafx.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="ffmpeg_DXVA_decoder.cpp">
-      <Filter>源文件</Filter>
-    </ClCompile>
-    <ClCompile Include="D3DVidRender.cpp">
-      <Filter>源文件</Filter>
-    </ClCompile>
-    <ClCompile Include="ffmpeg_dxva2.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>
