@@ -254,57 +254,73 @@ static int hw_decoder_init(AVCodecContext *ctx, const enum AVHWDeviceType type)
 	return err;
 }
 
-static int set_hwframe_ctx(AVCodecContext *ctx, AVBufferRef *hw_device_ctx, enum AVPixelFormat hw_pix_fmt, enum AVPixelFormat sw_format, int width, int height)
+static int set_hwframe_ctx(AVCodecContext *ctx, AVBufferRef *hw_device_ctx, enum AVPixelFormat hw_pix_fmt, enum AVPixelFormat sw_format)
 {
+	int surface_alignment, num_surfaces;
 	AVBufferRef *hw_frames_ref;
 	AVHWFramesContext *frames_ctx = NULL;
 	int err = 0;
+
+	//if (hw_pix_fmt != AV_PIX_FMT_DXVA2_VLD || hw_pix_fmt != AV_PIX_FMT_D3D11)
+	//	return 0;
 
 	if (!(hw_frames_ref = av_hwframe_ctx_alloc(hw_device_ctx))) {
 		fprintf(stderr, "Failed to create frame context.\n");
 		return -1;
 	}
+
+	/* decoding MPEG-2 requires additional alignment on some Intel GPUs,
+	but it causes issues for H.264 on certain AMD GPUs..... */
+	if (ctx->codec_id == AV_CODEC_ID_MPEG2VIDEO)
+		surface_alignment = 32;
+	/* the HEVC DXVA2 spec asks for 128 pixel aligned surfaces to ensure
+	all coding features have enough room to work with */
+	else if (ctx->codec_id == AV_CODEC_ID_HEVC || ctx->codec_id == AV_CODEC_ID_AV1)
+		surface_alignment = 128;
+	else
+		surface_alignment = 16;
+
+	/* 1 base work surface */
+	num_surfaces = 1;
+
+	/* add surfaces based on number of possible refs */
+	if (ctx->codec_id == AV_CODEC_ID_H264 || ctx->codec_id == AV_CODEC_ID_HEVC)
+		num_surfaces += 16;
+	else if (ctx->codec_id == AV_CODEC_ID_VP9 || ctx->codec_id == AV_CODEC_ID_AV1)
+		num_surfaces += 8;
+	else
+		num_surfaces += 2;
+
+	// If the user has requested that extra output surfaces be
+	// available then add them here.
+	if (ctx->extra_hw_frames > 0)
+		num_surfaces += ctx->extra_hw_frames;
+
+	// If frame threading is enabled then an extra surface per thread
+	// is also required.
+	if (ctx->active_thread_type & FF_THREAD_FRAME)
+		num_surfaces += ctx->thread_count;
+
 	frames_ctx = (AVHWFramesContext *)(hw_frames_ref->data);
 	frames_ctx->format = hw_pix_fmt;
 	frames_ctx->sw_format = sw_format;
-	frames_ctx->width = width;
-	frames_ctx->height = height;
-	frames_ctx->initial_pool_size = 20;
+	frames_ctx->width = FFALIGN(ctx->width, surface_alignment);
+	frames_ctx->height = FFALIGN(ctx->height, surface_alignment);
+	frames_ctx->initial_pool_size = num_surfaces;
 
-#if CONFIG_D3D11VA
-	if (hw_pix_fmt == AV_PIX_FMT_D3D11) {
-		AVD3D11VAFramesContext *frames_hwctx = (AVD3D11VAFramesContext *)frames_ctx->hwctx;
-		frames_hwctx->BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
-		frames_hwctx->MiscFlags = 0;
-#if 0
-		// current os (only support DXGI_FORMAT_B8G8R8A8_UNORM)
-		AVD3D11VADeviceContext *device_hwctx = (AVD3D11VADeviceContext *)frames_ctx->device_ctx->hwctx;;
-		HRESULT result;
-		D3D11_TEXTURE2D_DESC textureDesc;
+#if CONFIG_DXVA2
+	if (frames_ctx->format == AV_PIX_FMT_DXVA2_VLD) {
+		AVDXVA2FramesContext *frames_hwctx = (AVDXVA2FramesContext *)frames_ctx->hwctx;
 
-		memset(&textureDesc, 0, sizeof(textureDesc));
-
-		textureDesc.Width = width;
-		textureDesc.Height = height;
-		textureDesc.MipLevels = 1;
-		textureDesc.ArraySize = 1;
-		textureDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-		textureDesc.SampleDesc.Count = 1;
-		textureDesc.SampleDesc.Quality = 0;
-		textureDesc.MiscFlags = 0;
-		textureDesc.Usage = D3D11_USAGE_DEFAULT;
-		textureDesc.CPUAccessFlags = 0;
-		textureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
-
-		result = device_hwctx->device->CreateTexture2D(
-			&textureDesc,
-			NULL,
-			&frames_hwctx->texture);
-		if (FAILED(result)) {
-			frames_hwctx->texture = NULL;
-		}
+		frames_hwctx->surface_type = DXVA2_VideoDecoderRenderTarget;
+	}
 #endif
 
+#if CONFIG_D3D11VA
+	if (frames_ctx->format == AV_PIX_FMT_D3D11) {
+		AVD3D11VAFramesContext *frames_hwctx = (AVD3D11VAFramesContext *)frames_ctx->hwctx;
+
+		frames_hwctx->BindFlags = D3D11_BIND_DECODER;
 	}
 #endif
 
@@ -621,7 +637,7 @@ DWORD WINAPI ThreadProc(_In_ LPVOID lpParameter)
 #if 0
 	//  auto create AVHWFramesContext for decode
 	/* set hw_frames_ctx for encoder's AVCodecContext */
-	if ((ret = set_hwframe_ctx(codecctx, hw_device_ctx, hw_pix_fmt, AV_PIX_FMT_NV12, codecctx->width, codecctx->height)) < 0) {
+	if ((ret = set_hwframe_ctx(codecctx, hw_device_ctx, hw_pix_fmt, AV_PIX_FMT_NV12)) < 0) {
 		fprintf(stderr, "Failed to set hw frame context.\n");
 		exit(EXIT_FAILURE);
 	}

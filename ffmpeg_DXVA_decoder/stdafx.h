@@ -30,6 +30,11 @@ extern "C"
 }
 
 #include "config.h"
+
+#if CONFIG_DXVA2
+#include "libavutil/hwcontext_dxva2.h"
+#endif
+
 #if CONFIG_D3D11VA
 #include "libavutil/hwcontext_d3d11va.h"
 #endif
