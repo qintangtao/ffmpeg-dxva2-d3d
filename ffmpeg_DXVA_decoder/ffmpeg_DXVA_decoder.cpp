@@ -276,6 +276,35 @@ static int set_hwframe_ctx(AVCodecContext *ctx, AVBufferRef *hw_device_ctx, enum
 		AVD3D11VAFramesContext *frames_hwctx = (AVD3D11VAFramesContext *)frames_ctx->hwctx;
 		frames_hwctx->BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
 		frames_hwctx->MiscFlags = 0;
+#if 0
+		// current os (only support DXGI_FORMAT_B8G8R8A8_UNORM)
+		AVD3D11VADeviceContext *device_hwctx = (AVD3D11VADeviceContext *)frames_ctx->device_ctx->hwctx;;
+		HRESULT result;
+		D3D11_TEXTURE2D_DESC textureDesc;
+
+		memset(&textureDesc, 0, sizeof(textureDesc));
+
+		textureDesc.Width = width;
+		textureDesc.Height = height;
+		textureDesc.MipLevels = 1;
+		textureDesc.ArraySize = 1;
+		textureDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+		textureDesc.SampleDesc.Count = 1;
+		textureDesc.SampleDesc.Quality = 0;
+		textureDesc.MiscFlags = 0;
+		textureDesc.Usage = D3D11_USAGE_DEFAULT;
+		textureDesc.CPUAccessFlags = 0;
+		textureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+
+		result = device_hwctx->device->CreateTexture2D(
+			&textureDesc,
+			NULL,
+			&frames_hwctx->texture);
+		if (FAILED(result)) {
+			frames_hwctx->texture = NULL;
+		}
+#endif
+
 	}
 #endif
 
@@ -323,6 +352,7 @@ static void calculate_display_rect(RECT *rect,
 	rect->bottom = rect->top + FFMAX(height, 1);
 }
 
+
 typedef struct DXVA2DevicePriv {
 	HMODULE d3dlib;
 	HMODULE dxva2lib;
@@ -332,10 +362,6 @@ typedef struct DXVA2DevicePriv {
 	IDirect3D9       *d3d9;
 	IDirect3DDevice9 *d3d9device;
 } DXVA2DevicePriv;
-
-static const D3DPRESENT_PARAMETERS dxva2_present_params = {
-	
-};
 
 
 static IDirect3DSurface9 * m_pDirect3DSurfaceRender = NULL;
