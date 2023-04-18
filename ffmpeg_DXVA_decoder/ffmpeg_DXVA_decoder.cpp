@@ -618,11 +618,14 @@ DWORD WINAPI ThreadProc(_In_ LPVOID lpParameter)
 
 	codecctx->pix_fmt = hw_pix_fmt;
 
+#if 0
+	//  auto create AVHWFramesContext for decode
 	/* set hw_frames_ctx for encoder's AVCodecContext */
 	if ((ret = set_hwframe_ctx(codecctx, hw_device_ctx, hw_pix_fmt, AV_PIX_FMT_NV12, codecctx->width, codecctx->height)) < 0) {
 		fprintf(stderr, "Failed to set hw frame context.\n");
 		exit(EXIT_FAILURE);
 	}
+#endif
 
 	ret = avcodec_open2(codecctx, codec, NULL);
 	if (ret < 0) {
