@@ -230,14 +230,20 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 static int hw_decoder_init(AVCodecContext *ctx, const enum AVHWDeviceType type)
 {
 	AVDictionary *opts = NULL;
+	char *device = NULL;
 	int err = 0;
 
-	av_dict_set_int(&opts, "width", ctx->width, 0);
-	av_dict_set_int(&opts, "height", ctx->height, 0);
-	av_dict_set_int(&opts, "hwnd", (int64_t )g_hwWnd, 0);
+	if (type == AV_HWDEVICE_TYPE_DXVA2) {
+		av_dict_set_int(&opts, "width", ctx->width, 0);
+		av_dict_set_int(&opts, "height", ctx->height, 0);
+		av_dict_set_int(&opts, "hwnd", (int64_t)g_hwWnd, 0);
+	}
+	else if (type == AV_HWDEVICE_TYPE_D3D11VA) {
+		device = "0";
+	}
 
 	if ((err = av_hwdevice_ctx_create(&hw_device_ctx, type,
-		NULL, opts, 0)) < 0) {
+		device, opts, 0)) < 0) {
 		fprintf(stderr, "Failed to create specified HW device.\n");
 		av_dict_free(&opts);
 		return err;
@@ -264,6 +270,14 @@ static int set_hwframe_ctx(AVCodecContext *ctx, AVBufferRef *hw_device_ctx, enum
 	frames_ctx->width = width;
 	frames_ctx->height = height;
 	frames_ctx->initial_pool_size = 20;
+
+#if CONFIG_D3D11VA
+	if (hw_pix_fmt == AV_PIX_FMT_D3D11) {
+		AVD3D11VAFramesContext *frames_hwctx = (AVD3D11VAFramesContext *)frames_ctx->hwctx;
+		frames_hwctx->BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+		frames_hwctx->MiscFlags = 0;
+	}
+#endif
 
 	if ((err = av_hwframe_ctx_init(hw_frames_ref)) < 0) {
 		fprintf(stderr, "Failed to initialize frame context.");
@@ -319,6 +333,11 @@ typedef struct DXVA2DevicePriv {
 	IDirect3DDevice9 *d3d9device;
 } DXVA2DevicePriv;
 
+static const D3DPRESENT_PARAMETERS dxva2_present_params = {
+	
+};
+
+
 static IDirect3DSurface9 * m_pDirect3DSurfaceRender = NULL;
 static IDirect3DSurface9 * m_pBackBuffer = NULL;
 static CRITICAL_SECTION cs;
@@ -332,6 +351,26 @@ static int dxva2_retrieve_data(AVCodecContext *avctx, AVFrame *frame)
 	RECT rect = { 0 };
 
 	EnterCriticalSection(&cs);
+	GetClientRect(g_hwWnd, &m_rtViewport);
+
+	// reset
+#if 0
+	D3DDISPLAYMODE d3ddm;
+	D3DPRESENT_PARAMETERS d3dpp;
+	IDirect3D9_GetAdapterDisplayMode(priv->d3d9, D3DADAPTER_DEFAULT, &d3ddm);
+	d3dpp.Windowed = TRUE;
+	d3dpp.BackBufferCount = 0;
+	d3dpp.SwapEffect = D3DSWAPEFFECT_DISCARD;
+	d3dpp.Flags = D3DPRESENTFLAG_VIDEO,
+	d3dpp.BackBufferFormat = d3ddm.Format;
+	d3dpp.hDeviceWindow = g_hwWnd;
+	d3dpp.BackBufferWidth = m_rtViewport.right - m_rtViewport.left;
+	d3dpp.BackBufferHeight = m_rtViewport.bottom - m_rtViewport.top;
+	d3dpp.EnableAutoDepthStencil = FALSE;
+	d3dpp.FullScreen_RefreshRateInHz = D3DPRESENT_RATE_DEFAULT;
+	d3dpp.PresentationInterval = D3DPRESENT_INTERVAL_IMMEDIATE;
+	IDirect3DDevice9_Reset(priv->d3d9device, &d3dpp);
+#endif
 
 	IDirect3DDevice9Ex_Clear(priv->d3d9device, 0, NULL, D3DCLEAR_TARGET, D3DCOLOR_XRGB(0, 0, 0), 1.0f, 0);
 	IDirect3DDevice9Ex_BeginScene(priv->d3d9device);
@@ -347,12 +386,12 @@ static int dxva2_retrieve_data(AVCodecContext *avctx, AVFrame *frame)
 	
 	IDirect3DDevice9Ex_EndScene(priv->d3d9device);
 	
+#if 0
 	GetClientRect(g_hwWnd, &m_rtViewport);
-#if 1
 	calculate_display_rect(&rect, m_rtViewport.left, m_rtViewport.top, m_rtViewport.right - m_rtViewport.left, m_rtViewport.bottom - m_rtViewport.top, frame->width, frame->height, frame->sample_aspect_ratio);
 	IDirect3DDevice9Ex_Present(priv->d3d9device, NULL, &rect, NULL, NULL);
 #else
-	IDirect3DDevice9Ex_Present(priv->d3d9device, NULL, &m_rtViewport, NULL, NULL);
+	IDirect3DDevice9Ex_Present(priv->d3d9device, NULL, NULL, NULL, NULL);
 #endif
 
 	LeaveCriticalSection(&cs);
@@ -526,6 +565,8 @@ DWORD WINAPI ThreadProc(_In_ LPVOID lpParameter)
 		exit(EXIT_FAILURE);
 
 	type = av_hwdevice_find_type_by_name("dxva2");
+	//type = av_hwdevice_find_type_by_name("d3d11va");
+	
 	if (type == AV_HWDEVICE_TYPE_NONE)
 		exit(EXIT_FAILURE);
 

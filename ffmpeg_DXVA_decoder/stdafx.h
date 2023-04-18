@@ -28,3 +28,8 @@ extern "C"
 #include "libavcodec/avcodec.h"
 #include "libavutil/time.h"
 }
+
+#include "config.h"
+#if CONFIG_D3D11VA
+#include "libavutil/hwcontext_d3d11va.h"
+#endif
