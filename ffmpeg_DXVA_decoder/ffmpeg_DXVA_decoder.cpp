@@ -840,12 +840,14 @@ DWORD WINAPI ThreadProc(_In_ LPVOID lpParameter)
 	if (avcodec_parameters_to_context(codecctx, fc->streams[videoindex]->codecpar) < 0)
 		exit(EXIT_FAILURE);
 
+#if 0
 #if CONFIG_DXVA2
-	//type = av_hwdevice_find_type_by_name("dxva2");
+	type = av_hwdevice_find_type_by_name("dxva2");
 #endif
-
+#else
 #if CONFIG_D3D11VA
 	type = av_hwdevice_find_type_by_name("d3d11va");
+#endif
 #endif
 
 	if (type == AV_HWDEVICE_TYPE_NONE)

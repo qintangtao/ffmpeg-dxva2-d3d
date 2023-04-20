@@ -5,7 +5,35 @@ Render directly after GPU decoding
 > version 6.0
 
 ---
-### decode
+
+### test
+
+* set path
+```
+	DWORD WINAPI ThreadProc(_In_ LPVOID lpParameter)
+	{
+		const char *filename = "H:/test.mp4";
+	}
+```
+
+* set device
+```
+	DWORD WINAPI ThreadProc(_In_ LPVOID lpParameter)
+	{
+		#if CONFIG_DXVA2
+			type = av_hwdevice_find_type_by_name("dxva2");
+		#endif
+		#if CONFIG_D3D11VA
+			type = av_hwdevice_find_type_by_name("d3d11va");
+		#endif
+	}
+```
+
+---
+
+### DXVA2+D3D9
+
+#### decoder
 * av_hwdevice_ctx_create
 ```
 	av_dict_set_int(&opts, "width", ctx->width, 0);
@@ -14,27 +42,13 @@ Render directly after GPU decoding
 	 av_hwdevice_ctx_create(&hw_device_ctx, type, NULL, NULL, 0);
 ```
 
-* av_hwframe_ctx_init
-```
-	frames_ctx = (AVHWFramesContext *)(hw_frames_ref->data);
-	frames_ctx->format = hw_pix_fmt;
-	frames_ctx->sw_format = sw_format;
-	frames_ctx->width = width;
-	frames_ctx->height = height;
-	frames_ctx->initial_pool_size = 20;
-	av_hwframe_ctx_init(hw_frames_ref);
-```
-
----
-
-### show
+#### render
 
 * decode_write
 ```
 	if (frame->format == AV_PIX_FMT_DXVA2_VLD)
 			dxva2_retrieve_data(avctx, frame);
 ```
-
 
 * struct DXVA2DevicePriv
 ```
@@ -48,6 +62,7 @@ typedef struct DXVA2DevicePriv {
 	IDirect3DDevice9 *d3d9device;
 } DXVA2DevicePriv;
 ```
+
 * dxva2_retrieve_data
 ```
 	AVHWDeviceContext  *device_ctx = (AVHWDeviceContext*)avctx->hw_device_ctx->data;
@@ -69,4 +84,77 @@ typedef struct DXVA2DevicePriv {
 
 	GetClientRect(g_hwWnd, &m_rtViewport);
 	IDirect3DDevice9Ex_Present(priv->d3d9device, NULL, &m_rtViewport, NULL, NULL);
+```
+
+---
+
+### D3D11VA+D3D11
+
+#### decoder
+* av_hwdevice_ctx_create
+```
+	av_dict_set_int(&opts, "width", ctx->width, 0);
+	av_dict_set_int(&opts, "height", ctx->height, 0);
+	av_dict_set_int(&opts, "hwnd", (int64_t )g_hwWnd, 0);
+	 av_hwdevice_ctx_create(&hw_device_ctx, type, NULL, NULL, 0);
+
+	m_pD3D11Device = d3d11_device_ctx->device;
+	m_pD3D11DeviceContext = d3d11_device_ctx->device_context;
+	m_pD3D11VideoDevice = d3d11_device_ctx->video_device;
+	m_pD3D11VideoContext = d3d11_device_ctx->video_context;
+
+	d3d11_init(g_hwWnd);
+#endif
+```
+
+* d3d11_init
+```
+    RECT rect;
+	GetClientRect(hWnd, &rect);
+
+	DXGI_SWAP_CHAIN_DESC1 swapChainDesc;
+	ZeroMemory(&swapChainDesc, sizeof(swapChainDesc));
+	swapChainDesc.Width = rect.right - rect.left;
+	swapChainDesc.Height = rect.bottom - rect.top;
+	swapChainDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+	swapChainDesc.Stereo = FALSE;
+	swapChainDesc.SampleDesc.Count = 1;
+	swapChainDesc.SampleDesc.Quality = 0;
+	swapChainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+	swapChainDesc.BufferCount = 2;
+	//swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+	swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+	swapChainDesc.Scaling = DXGI_SCALING_STRETCH;
+	//swapChainDesc.AlphaMode = DXGI_ALPHA_MODE::DXGI_ALPHA_MODE_IGNORE;
+	//swapChainDesc.Flags = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL; // DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+	swapChainDesc.Flags = 0;
+	pIDXGIFactory3->CreateSwapChainForHwnd(m_pD3D11Device, hWnd, &swapChainDesc, NULL, NULL, &pSwapChain1);
+```
+
+#### render
+
+* decode_write
+```
+	if (frame->format == AV_PIX_FMT_D3D11)
+		d3d11va_retrieve_data(avctx, frame);
+```
+
+* d3d11va_retrieve_data
+```
+	D3D11_VIDEO_PROCESSOR_STREAM StreamData;
+	ZeroMemory(&StreamData, sizeof(StreamData));
+	StreamData.Enable = TRUE;
+	StreamData.OutputIndex = 0;
+	StreamData.InputFrameOrField = 0;
+	StreamData.PastFrames = 0;
+	StreamData.FutureFrames = 0;
+	StreamData.ppPastSurfaces = NULL;
+	StreamData.ppFutureSurfaces = NULL;
+	StreamData.pInputSurface = pD3D11VideoProcessorInputViewIn;
+	StreamData.ppPastSurfacesRight = NULL;
+	StreamData.ppFutureSurfacesRight = NULL;
+
+	hr = m_pD3D11VideoContext->VideoProcessorBlt(m_pD3D11VideoProcessor, pD3D11VideoProcessorOutputView, 0, 1, &StreamData);
+
+	pSwapChain2->Present1(0, DXGI_PRESENT_DO_NOT_WAIT, &parameters);
 ```
