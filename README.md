@@ -92,56 +92,50 @@ m_pD3D11DeviceContext = d3d11_device_ctx->device_context;
 m_pD3D11VideoDevice = d3d11_device_ctx->video_device;
 m_pD3D11VideoContext = d3d11_device_ctx->video_context;
 d3d11_init(g_hwWnd);
-#endif
 ```
 
 * d3d11_init
 ```
-    RECT rect;
-	GetClientRect(hWnd, &rect);
-	DXGI_SWAP_CHAIN_DESC1 swapChainDesc;
-	ZeroMemory(&swapChainDesc, sizeof(swapChainDesc));
-	swapChainDesc.Width = rect.right - rect.left;
-	swapChainDesc.Height = rect.bottom - rect.top;
-	swapChainDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-	swapChainDesc.Stereo = FALSE;
-	swapChainDesc.SampleDesc.Count = 1;
-	swapChainDesc.SampleDesc.Quality = 0;
-	swapChainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-	swapChainDesc.BufferCount = 2;
-	//swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-	swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
-	swapChainDesc.Scaling = DXGI_SCALING_STRETCH;
-	//swapChainDesc.AlphaMode = DXGI_ALPHA_MODE::DXGI_ALPHA_MODE_IGNORE;
-	//swapChainDesc.Flags = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL; // DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
-	swapChainDesc.Flags = 0;
-	pIDXGIFactory3->CreateSwapChainForHwnd(m_pD3D11Device, hWnd, &swapChainDesc, NULL, NULL, &pSwapChain1);
+RECT rect;
+GetClientRect(hWnd, &rect);
+DXGI_SWAP_CHAIN_DESC1 swapChainDesc;
+ZeroMemory(&swapChainDesc, sizeof(swapChainDesc));
+swapChainDesc.Width = rect.right - rect.left;
+swapChainDesc.Height = rect.bottom - rect.top;
+swapChainDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+swapChainDesc.Stereo = FALSE;
+swapChainDesc.SampleDesc.Count = 1;
+swapChainDesc.SampleDesc.Quality = 0;
+swapChainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+swapChainDesc.BufferCount = 2;
+swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+swapChainDesc.Scaling = DXGI_SCALING_STRETCH;
+swapChainDesc.Flags = 0;
+pIDXGIFactory3->CreateSwapChainForHwnd(m_pD3D11Device, hWnd, &swapChainDesc, NULL, NULL, &pSwapChain1);
 ```
 
 #### render
 
 * decode_write
 ```
-	if (frame->format == AV_PIX_FMT_D3D11)
-		d3d11va_retrieve_data(avctx, frame);
+if (frame->format == AV_PIX_FMT_D3D11)
+	d3d11va_retrieve_data(avctx, frame);
 ```
 
 * d3d11va_retrieve_data
 ```
-	D3D11_VIDEO_PROCESSOR_STREAM StreamData;
-	ZeroMemory(&StreamData, sizeof(StreamData));
-	StreamData.Enable = TRUE;
-	StreamData.OutputIndex = 0;
-	StreamData.InputFrameOrField = 0;
-	StreamData.PastFrames = 0;
-	StreamData.FutureFrames = 0;
-	StreamData.ppPastSurfaces = NULL;
-	StreamData.ppFutureSurfaces = NULL;
-	StreamData.pInputSurface = pD3D11VideoProcessorInputViewIn;
-	StreamData.ppPastSurfacesRight = NULL;
-	StreamData.ppFutureSurfacesRight = NULL;
-
-	hr = m_pD3D11VideoContext->VideoProcessorBlt(m_pD3D11VideoProcessor, pD3D11VideoProcessorOutputView, 0, 1, &StreamData);
-
-	pSwapChain2->Present1(0, DXGI_PRESENT_DO_NOT_WAIT, &parameters);
+D3D11_VIDEO_PROCESSOR_STREAM StreamData;
+ZeroMemory(&StreamData, sizeof(StreamData));
+StreamData.Enable = TRUE;
+StreamData.OutputIndex = 0;
+StreamData.InputFrameOrField = 0;
+StreamData.PastFrames = 0;
+StreamData.FutureFrames = 0;
+StreamData.ppPastSurfaces = NULL;
+StreamData.ppFutureSurfaces = NULL;
+StreamData.pInputSurface = pD3D11VideoProcessorInputViewIn;
+StreamData.ppPastSurfacesRight = NULL;
+StreamData.ppFutureSurfacesRight = NULL;
+m_pD3D11VideoContext->VideoProcessorBlt(m_pD3D11VideoProcessor, pD3D11VideoProcessorOutputView, 0, 1, &StreamData);
+pSwapChain2->Present1(0, DXGI_PRESENT_DO_NOT_WAIT, &parameters);
 ```
