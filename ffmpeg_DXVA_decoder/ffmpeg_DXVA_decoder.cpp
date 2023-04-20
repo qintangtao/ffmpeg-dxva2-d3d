@@ -9,6 +9,10 @@
 
 #pragma warning(disable : 4996)
 
+#ifdef ENABLED_SAVE_FILE
+static FILE *output_file = NULL;
+#endif
+
 // 全局变量: 
 HINSTANCE hInst;                                // 当前实例
 WCHAR szTitle[MAX_LOADSTRING];                  // 标题栏文本
@@ -200,35 +204,108 @@ INT_PTR CALLBACK About(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
     return (INT_PTR)FALSE;
 }
 
-//CD3DVidRender m_D3DVidRender;
-#if 0
-AVPixelFormat GetHwFormat(AVCodecContext *s, const AVPixelFormat *pix_fmts)
+
+#if CONFIG_DXVA2
+
+static void calculate_display_rect(RECT *rect,
+	int scr_xleft, int scr_ytop, int scr_width, int scr_height,
+	int pic_width, int pic_height, AVRational pic_sar)
 {
-	InputStream* ist = (InputStream*)s->opaque;
-	ist->active_hwaccel_id = HWACCEL_DXVA2;
-	ist->hwaccel_pix_fmt = AV_PIX_FMT_DXVA2_VLD;
-	return ist->hwaccel_pix_fmt;
+	float aspect_ratio;
+	int width, height, x, y;
+
+	if (pic_sar.num == 0)
+		aspect_ratio = 0;
+	else
+		aspect_ratio = (float)av_q2d(pic_sar);
+
+	if (aspect_ratio <= 0.0)
+		aspect_ratio = 1.0;
+	aspect_ratio *= (float)pic_width / (float)pic_height;
+
+	/* XXX: we suppose the screen has a 1.0 pixel ratio */
+	height = scr_height;
+	width = lrint(height * aspect_ratio) & ~1;
+	if (width > scr_width) {
+		width = scr_width;
+		height = lrint(width / aspect_ratio) & ~1;
+	}
+	x = (scr_width - width) / 2;
+	y = (scr_height - height) / 2;
+	rect->left = scr_xleft + x;
+	rect->top = scr_ytop + y;
+	rect->right = rect->left + FFMAX(width, 1);
+	rect->bottom = rect->top + FFMAX(height, 1);
 }
+
+typedef struct DXVA2DevicePriv {
+	HMODULE d3dlib;
+	HMODULE dxva2lib;
+
+	HANDLE device_handle;
+
+	IDirect3D9       *d3d9;
+	IDirect3DDevice9 *d3d9device;
+} DXVA2DevicePriv;
+
+static CRITICAL_SECTION cs;
+static int dxva2_retrieve_data(AVCodecContext *avctx, AVFrame *frame)
+{
+	AVHWDeviceContext  *device_ctx = (AVHWDeviceContext*)avctx->hw_device_ctx->data;
+	DXVA2DevicePriv    *priv = (DXVA2DevicePriv       *)device_ctx->user_opaque;
+	LPDIRECT3DSURFACE9 surface = (LPDIRECT3DSURFACE9)frame->data[3];
+	IDirect3DSurface9 * pBackBuffer = NULL;
+	RECT m_rtViewport;
+	RECT rect = { 0 };
+
+	EnterCriticalSection(&cs);
+	GetClientRect(g_hwWnd, &m_rtViewport);
+
+	// reset
+#if 0
+	D3DDISPLAYMODE d3ddm;
+	D3DPRESENT_PARAMETERS d3dpp;
+	IDirect3D9_GetAdapterDisplayMode(priv->d3d9, D3DADAPTER_DEFAULT, &d3ddm);
+	d3dpp.Windowed = TRUE;
+	d3dpp.BackBufferCount = 0;
+	d3dpp.SwapEffect = D3DSWAPEFFECT_DISCARD;
+	d3dpp.Flags = D3DPRESENTFLAG_VIDEO,
+		d3dpp.BackBufferFormat = d3ddm.Format;
+	d3dpp.hDeviceWindow = g_hwWnd;
+	d3dpp.BackBufferWidth = m_rtViewport.right - m_rtViewport.left;
+	d3dpp.BackBufferHeight = m_rtViewport.bottom - m_rtViewport.top;
+	d3dpp.EnableAutoDepthStencil = FALSE;
+	d3dpp.FullScreen_RefreshRateInHz = D3DPRESENT_RATE_DEFAULT;
+	d3dpp.PresentationInterval = D3DPRESENT_INTERVAL_IMMEDIATE;
+	IDirect3DDevice9_Reset(priv->d3d9device, &d3dpp);
 #endif
 
-static AVBufferRef *hw_device_ctx = NULL;
-static enum AVPixelFormat hw_pix_fmt;
+	RECT SourceRect = { 0,0,((~0 - 1)&frame->width),((~0 - 1)&frame->height) };
 
-static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
-	const enum AVPixelFormat *pix_fmts)
-{
-	const enum AVPixelFormat *p;
+	IDirect3DDevice9Ex_Clear(priv->d3d9device, 0, NULL, D3DCLEAR_TARGET, D3DCOLOR_XRGB(0, 0, 0), 1.0f, 0);
+	IDirect3DDevice9Ex_BeginScene(priv->d3d9device);
+	IDirect3DDevice9Ex_GetBackBuffer(priv->d3d9device, 0, 0, D3DBACKBUFFER_TYPE_MONO, &pBackBuffer);
+	IDirect3DDevice9Ex_StretchRect(priv->d3d9device, surface, &SourceRect, pBackBuffer, NULL, D3DTEXF_LINEAR); //D3DTEXF_LINEAR or D3DTEXF_POINT
+	IDirect3DSurface9_Release(pBackBuffer);
+	IDirect3DDevice9Ex_EndScene(priv->d3d9device);
 
-	for (p = pix_fmts; *p != -1; p++) {
-		if (*p == hw_pix_fmt)
-			return *p;
-	}
+#if 0
+	GetClientRect(g_hwWnd, &m_rtViewport);
+	calculate_display_rect(&rect, m_rtViewport.left, m_rtViewport.top, m_rtViewport.right - m_rtViewport.left, m_rtViewport.bottom - m_rtViewport.top, frame->width, frame->height, frame->sample_aspect_ratio);
+	IDirect3DDevice9Ex_Present(priv->d3d9device, NULL, &rect, NULL, NULL);
+#else
+	IDirect3DDevice9Ex_Present(priv->d3d9device, NULL, NULL, NULL, NULL);
+#endif
 
-	fprintf(stderr, "Failed to get HW surface format.\n");
-	return AV_PIX_FMT_NONE;
+	LeaveCriticalSection(&cs);
+
+	return 0;
 }
 
+#endif
+
 #if CONFIG_D3D11VA
+
 #include <d3d11.h>
 #include <dxgi.h>
 #include <dxgi1_3.h>
@@ -488,6 +565,24 @@ void d3d11va_retrieve_data(AVCodecContext *avctx, AVFrame *frame)
 
 #endif
 
+
+static AVBufferRef *hw_device_ctx = NULL;
+static enum AVPixelFormat hw_pix_fmt;
+
+static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
+	const enum AVPixelFormat *pix_fmts)
+{
+	const enum AVPixelFormat *p;
+
+	for (p = pix_fmts; *p != -1; p++) {
+		if (*p == hw_pix_fmt)
+			return *p;
+	}
+
+	fprintf(stderr, "Failed to get HW surface format.\n");
+	return AV_PIX_FMT_NONE;
+}
+
 static int hw_decoder_init(AVCodecContext *ctx, const enum AVHWDeviceType type)
 {
 	AVDictionary *opts = NULL;
@@ -527,110 +622,6 @@ static int hw_decoder_init(AVCodecContext *ctx, const enum AVHWDeviceType type)
 
 	av_dict_free(&opts);
 	return err;
-}
-
-static void calculate_display_rect(RECT *rect,
-	int scr_xleft, int scr_ytop, int scr_width, int scr_height,
-	int pic_width, int pic_height, AVRational pic_sar)
-{
-	float aspect_ratio;
-	int width, height, x, y;
-
-	if (pic_sar.num == 0)
-		aspect_ratio = 0;
-	else
-		aspect_ratio = (float)av_q2d(pic_sar);
-
-	if (aspect_ratio <= 0.0)
-		aspect_ratio = 1.0;
-	aspect_ratio *= (float)pic_width / (float)pic_height;
-
-	/* XXX: we suppose the screen has a 1.0 pixel ratio */
-	height = scr_height;
-	width = lrint(height * aspect_ratio) & ~1;
-	if (width > scr_width) {
-		width = scr_width;
-		height = lrint(width / aspect_ratio) & ~1;
-	}
-	x = (scr_width - width) / 2;
-	y = (scr_height - height) / 2;
-	rect->left = scr_xleft + x;
-	rect->top = scr_ytop + y;
-	rect->right = rect->left + FFMAX(width, 1);
-	rect->bottom = rect->top + FFMAX(height, 1);
-}
-
-
-typedef struct DXVA2DevicePriv {
-	HMODULE d3dlib;
-	HMODULE dxva2lib;
-
-	HANDLE device_handle;
-
-	IDirect3D9       *d3d9;
-	IDirect3DDevice9 *d3d9device;
-} DXVA2DevicePriv;
-
-
-static IDirect3DSurface9 * m_pDirect3DSurfaceRender = NULL;
-static IDirect3DSurface9 * m_pBackBuffer = NULL;
-static CRITICAL_SECTION cs;
-static FILE *output_file = NULL;
-static int dxva2_retrieve_data(AVCodecContext *avctx, AVFrame *frame)
-{
-	AVHWDeviceContext  *device_ctx = (AVHWDeviceContext*)avctx->hw_device_ctx->data;
-	DXVA2DevicePriv    *priv = (DXVA2DevicePriv       *)device_ctx->user_opaque;
-	LPDIRECT3DSURFACE9 surface = (LPDIRECT3DSURFACE9)frame->data[3];
-	RECT m_rtViewport;
-	RECT rect = { 0 };
-
-	EnterCriticalSection(&cs);
-	GetClientRect(g_hwWnd, &m_rtViewport);
-
-	// reset
-#if 0
-	D3DDISPLAYMODE d3ddm;
-	D3DPRESENT_PARAMETERS d3dpp;
-	IDirect3D9_GetAdapterDisplayMode(priv->d3d9, D3DADAPTER_DEFAULT, &d3ddm);
-	d3dpp.Windowed = TRUE;
-	d3dpp.BackBufferCount = 0;
-	d3dpp.SwapEffect = D3DSWAPEFFECT_DISCARD;
-	d3dpp.Flags = D3DPRESENTFLAG_VIDEO,
-	d3dpp.BackBufferFormat = d3ddm.Format;
-	d3dpp.hDeviceWindow = g_hwWnd;
-	d3dpp.BackBufferWidth = m_rtViewport.right - m_rtViewport.left;
-	d3dpp.BackBufferHeight = m_rtViewport.bottom - m_rtViewport.top;
-	d3dpp.EnableAutoDepthStencil = FALSE;
-	d3dpp.FullScreen_RefreshRateInHz = D3DPRESENT_RATE_DEFAULT;
-	d3dpp.PresentationInterval = D3DPRESENT_INTERVAL_IMMEDIATE;
-	IDirect3DDevice9_Reset(priv->d3d9device, &d3dpp);
-#endif
-
-	IDirect3DDevice9Ex_Clear(priv->d3d9device, 0, NULL, D3DCLEAR_TARGET, D3DCOLOR_XRGB(0, 0, 0), 1.0f, 0);
-	IDirect3DDevice9Ex_BeginScene(priv->d3d9device);
-	if (m_pBackBuffer) {
-		IDirect3DSurface9_Release(m_pBackBuffer);
-		m_pBackBuffer = NULL;
-	}
-	IDirect3DDevice9Ex_GetBackBuffer(priv->d3d9device, 0, 0, D3DBACKBUFFER_TYPE_MONO, &m_pBackBuffer);
-
-	RECT SourceRect = { 0,0,((~0 - 1)&frame->width),((~0 - 1)&frame->height) };
-	IDirect3DDevice9Ex_StretchRect(priv->d3d9device, surface, &SourceRect, m_pBackBuffer, NULL, D3DTEXF_LINEAR);
-	//IDirect3DDevice9Ex_StretchRect(priv->d3d9device, surface, &SourceRect, m_pBackBuffer, NULL, D3DTEXF_POINT);
-	
-	IDirect3DDevice9Ex_EndScene(priv->d3d9device);
-	
-#if 0
-	GetClientRect(g_hwWnd, &m_rtViewport);
-	calculate_display_rect(&rect, m_rtViewport.left, m_rtViewport.top, m_rtViewport.right - m_rtViewport.left, m_rtViewport.bottom - m_rtViewport.top, frame->width, frame->height, frame->sample_aspect_ratio);
-	IDirect3DDevice9Ex_Present(priv->d3d9device, NULL, &rect, NULL, NULL);
-#else
-	IDirect3DDevice9Ex_Present(priv->d3d9device, NULL, NULL, NULL, NULL);
-#endif
-
-	LeaveCriticalSection(&cs);
-
-	return 0;
 }
 
 static int decode_write(AVCodecContext *avctx, AVPacket *packet)
@@ -679,10 +670,14 @@ static int decode_write(AVCodecContext *avctx, AVPacket *packet)
 		}
 
 #ifndef ENABLED_SAVE_FILE
+
+#if CONFIG_DXVA2
 		if (frame->format == AV_PIX_FMT_DXVA2_VLD)
 			dxva2_retrieve_data(avctx, frame);
+#endif
+
 #if CONFIG_D3D11VA
-		else if (frame->format == AV_PIX_FMT_D3D11)
+		if (frame->format == AV_PIX_FMT_D3D11)
 			d3d11va_retrieve_data(avctx, frame);
 #endif
 
@@ -802,9 +797,14 @@ DWORD WINAPI ThreadProc(_In_ LPVOID lpParameter)
 	if (avcodec_parameters_to_context(codecctx, fc->streams[videoindex]->codecpar) < 0)
 		exit(EXIT_FAILURE);
 
+#if CONFIG_DXVA2
 	//type = av_hwdevice_find_type_by_name("dxva2");
+#endif
+
+#if CONFIG_D3D11VA
 	type = av_hwdevice_find_type_by_name("d3d11va");
-	
+#endif
+
 	if (type == AV_HWDEVICE_TYPE_NONE)
 		exit(EXIT_FAILURE);
 
@@ -851,9 +851,15 @@ DWORD WINAPI ThreadProc(_In_ LPVOID lpParameter)
 	av_packet_free(&packet);
 	avcodec_close(codecctx);
 	avformat_close_input(&fc);
+
+#ifdef ENABLED_SAVE_FILE
 	if (output_file)
 		fclose(output_file);
+#endif
+
+#if CONFIG_DXVA2
 	DeleteCriticalSection(&cs);
+#endif
 
 	exit(EXIT_SUCCESS);
 	return 0;
