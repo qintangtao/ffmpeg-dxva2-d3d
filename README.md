@@ -10,23 +10,19 @@ Render directly after GPU decoding
 
 * set path
 ```
-	DWORD WINAPI ThreadProc(_In_ LPVOID lpParameter)
-	{
-		const char *filename = "H:/test.mp4";
-	}
+DWORD WINAPI ThreadProc(_In_ LPVOID lpParameter)
+{
+	const char *filename = "H:/test.mp4";
+}
 ```
 
 * set device
 ```
-	DWORD WINAPI ThreadProc(_In_ LPVOID lpParameter)
-	{
-		#if CONFIG_DXVA2
-			type = av_hwdevice_find_type_by_name("dxva2");
-		#endif
-		#if CONFIG_D3D11VA
-			type = av_hwdevice_find_type_by_name("d3d11va");
-		#endif
-	}
+DWORD WINAPI ThreadProc(_In_ LPVOID lpParameter)
+{
+	//type = av_hwdevice_find_type_by_name("dxva2");
+	type = av_hwdevice_find_type_by_name("d3d11va");
+}
 ```
 
 ---
@@ -36,18 +32,18 @@ Render directly after GPU decoding
 #### decoder
 * av_hwdevice_ctx_create
 ```
-	av_dict_set_int(&opts, "width", ctx->width, 0);
-	av_dict_set_int(&opts, "height", ctx->height, 0);
-	av_dict_set_int(&opts, "hwnd", (int64_t )g_hwWnd, 0);
-	 av_hwdevice_ctx_create(&hw_device_ctx, type, NULL, NULL, 0);
+av_dict_set_int(&opts, "width", ctx->width, 0);
+av_dict_set_int(&opts, "height", ctx->height, 0);
+av_dict_set_int(&opts, "hwnd", (int64_t )g_hwWnd, 0);
+av_hwdevice_ctx_create(&hw_device_ctx, type, NULL, NULL, 0);
 ```
 
 #### render
 
 * decode_write
 ```
-	if (frame->format == AV_PIX_FMT_DXVA2_VLD)
-			dxva2_retrieve_data(avctx, frame);
+if (frame->format == AV_PIX_FMT_DXVA2_VLD)
+		dxva2_retrieve_data(avctx, frame);
 ```
 
 * struct DXVA2DevicePriv
@@ -55,9 +51,7 @@ Render directly after GPU decoding
 typedef struct DXVA2DevicePriv {
 	HMODULE d3dlib;
 	HMODULE dxva2lib;
-
 	HANDLE device_handle;
-
 	IDirect3D9       *d3d9;
 	IDirect3DDevice9 *d3d9device;
 } DXVA2DevicePriv;
@@ -65,25 +59,21 @@ typedef struct DXVA2DevicePriv {
 
 * dxva2_retrieve_data
 ```
-	AVHWDeviceContext  *device_ctx = (AVHWDeviceContext*)avctx->hw_device_ctx->data;
-	DXVA2DevicePriv    *priv = (DXVA2DevicePriv       *)device_ctx->user_opaque;
-	LPDIRECT3DSURFACE9 surface = (LPDIRECT3DSURFACE9)frame->data[3];
-
-	IDirect3DDevice9Ex_Clear(priv->d3d9device, 0, NULL, D3DCLEAR_TARGET, D3DCOLOR_XRGB(0, 0, 0), 1.0f, 0);
-	IDirect3DDevice9Ex_BeginScene(priv->d3d9device);
-	if (m_pBackBuffer) {
-		IDirect3DSurface9_Release(m_pBackBuffer);
-		m_pBackBuffer = NULL;
-	}
-	IDirect3DDevice9Ex_GetBackBuffer(priv->d3d9device, 0, 0, D3DBACKBUFFER_TYPE_MONO, &m_pBackBuffer);
-
-	RECT SourceRect = { 0,0,((~0 - 1)&frame->width),((~0 - 1)&frame->height) };
-	IDirect3DDevice9Ex_StretchRect(priv->d3d9device, surface, &SourceRect, m_pBackBuffer, NULL, D3DTEXF_LINEAR);
-
-	IDirect3DDevice9Ex_EndScene(priv->d3d9device);
-
-	GetClientRect(g_hwWnd, &m_rtViewport);
-	IDirect3DDevice9Ex_Present(priv->d3d9device, NULL, &m_rtViewport, NULL, NULL);
+AVHWDeviceContext  *device_ctx = (AVHWDeviceContext*)avctx->hw_device_ctx->data;
+DXVA2DevicePriv    *priv = (DXVA2DevicePriv       *)device_ctx->user_opaque;
+LPDIRECT3DSURFACE9 surface = (LPDIRECT3DSURFACE9)frame->data[3];
+IDirect3DDevice9Ex_Clear(priv->d3d9device, 0, NULL, D3DCLEAR_TARGET, D3DCOLOR_XRGB(0, 0, 0), 1.0f, 0);
+IDirect3DDevice9Ex_BeginScene(priv->d3d9device);
+if (m_pBackBuffer) {
+	IDirect3DSurface9_Release(m_pBackBuffer);
+	m_pBackBuffer = NULL;
+}
+IDirect3DDevice9Ex_GetBackBuffer(priv->d3d9device, 0, 0, D3DBACKBUFFER_TYPE_MONO, &m_pBackBuffer);
+RECT SourceRect = { 0,0,((~0 - 1)&frame->width),((~0 - 1)&frame->height) };
+IDirect3DDevice9Ex_StretchRect(priv->d3d9device, surface, &SourceRect, m_pBackBuffer, NULL, D3DTEXF_LINEAR);
+IDirect3DDevice9Ex_EndScene(priv->d3d9device);
+GetClientRect(g_hwWnd, &m_rtViewport);
+IDirect3DDevice9Ex_Present(priv->d3d9device, NULL, &m_rtViewport, NULL, NULL);
 ```
 
 ---
@@ -93,17 +83,15 @@ typedef struct DXVA2DevicePriv {
 #### decoder
 * av_hwdevice_ctx_create
 ```
-	av_dict_set_int(&opts, "width", ctx->width, 0);
-	av_dict_set_int(&opts, "height", ctx->height, 0);
-	av_dict_set_int(&opts, "hwnd", (int64_t )g_hwWnd, 0);
-	 av_hwdevice_ctx_create(&hw_device_ctx, type, NULL, NULL, 0);
-
-	m_pD3D11Device = d3d11_device_ctx->device;
-	m_pD3D11DeviceContext = d3d11_device_ctx->device_context;
-	m_pD3D11VideoDevice = d3d11_device_ctx->video_device;
-	m_pD3D11VideoContext = d3d11_device_ctx->video_context;
-
-	d3d11_init(g_hwWnd);
+av_dict_set_int(&opts, "width", ctx->width, 0);
+av_dict_set_int(&opts, "height", ctx->height, 0);
+av_dict_set_int(&opts, "hwnd", (int64_t )g_hwWnd, 0);
+av_hwdevice_ctx_create(&hw_device_ctx, type, NULL, NULL, 0);
+m_pD3D11Device = d3d11_device_ctx->device;
+m_pD3D11DeviceContext = d3d11_device_ctx->device_context;
+m_pD3D11VideoDevice = d3d11_device_ctx->video_device;
+m_pD3D11VideoContext = d3d11_device_ctx->video_context;
+d3d11_init(g_hwWnd);
 #endif
 ```
 
@@ -111,7 +99,6 @@ typedef struct DXVA2DevicePriv {
 ```
     RECT rect;
 	GetClientRect(hWnd, &rect);
-
 	DXGI_SWAP_CHAIN_DESC1 swapChainDesc;
 	ZeroMemory(&swapChainDesc, sizeof(swapChainDesc));
 	swapChainDesc.Width = rect.right - rect.left;
