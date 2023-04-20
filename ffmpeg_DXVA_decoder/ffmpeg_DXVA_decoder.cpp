@@ -310,96 +310,109 @@ static int dxva2_retrieve_data(AVCodecContext *avctx, AVFrame *frame)
 #include <dxgi.h>
 #include <dxgi1_3.h>
 
+#define SAFE_RELEASE(X)                                   \
+    if ((X)) {                                            \
+        (X)->Release();										\
+        X = NULL;                                         \
+    }
+
+// get from ffmpeg 
 ID3D11Device        *m_pD3D11Device;
 ID3D11DeviceContext *m_pD3D11DeviceContext;
 ID3D11VideoDevice   *m_pD3D11VideoDevice;
 ID3D11VideoContext  *m_pD3D11VideoContext;
 
-static IDXGIDevice1 *m_pDXGIdevice = NULL;
-static IDXGIAdapter *m_pDXGIAdapter = NULL;
-static IDXGIFactory2 *m_pIDXGIFactory3 = NULL;
-static IDXGIOutput *m_pDXGIOutput = NULL;
-static IDXGISwapChain1 *m_swapChain1 = NULL;
-static IDXGISwapChain2 *m_swapchain2 = NULL;
-static ID3D11RenderTargetView *m_pRenderTargetView = NULL;
+static IDXGISwapChain2 *pSwapChain2 = NULL;
 static ID3D11VideoProcessorEnumerator *m_pD3D11VideoProcessorEnumerator = NULL;
 static ID3D11VideoProcessor *m_pD3D11VideoProcessor = NULL;
 
-static HRESULT d3d11_init_display()
+static HRESULT d3d11_init_display(HWND hWnd)
 {
 	HRESULT hr = S_OK;
+	IDXGIDevice1 *pDXGIdevice = NULL;
+	IDXGIAdapter *pDXGIAdapter = NULL;
+	IDXGIFactory2 *pIDXGIFactory3 = NULL;
+	IDXGIOutput *pDXGIOutput = NULL;
+	IDXGISwapChain1 *pSwapChain1 = NULL;
+	ID3D11RenderTargetView *pRenderTargetView = NULL;
 	ID3D11Texture2D* pBackBuffer = NULL;
 
-	try {
-		hr = m_pD3D11Device->QueryInterface(__uuidof(IDXGIDevice1), (void**)&m_pDXGIdevice);
-		if (FAILED(hr)) return hr;
+	hr = m_pD3D11Device->QueryInterface(__uuidof(IDXGIDevice1), (void**)&pDXGIdevice);
+	if (FAILED(hr)) goto done;
 
-		hr = m_pDXGIdevice->GetParent(__uuidof(IDXGIAdapter), (void **)&m_pDXGIAdapter);
-		if (FAILED(hr)) return hr;
+	hr = pDXGIdevice->GetParent(__uuidof(IDXGIAdapter), (void **)&pDXGIAdapter);
+	if (FAILED(hr)) goto done;
 
-		hr = m_pDXGIAdapter->GetParent(__uuidof(IDXGIFactory2), (void **)&m_pIDXGIFactory3);
-		if (FAILED(hr)) return hr;
+	hr = pDXGIAdapter->GetParent(__uuidof(IDXGIFactory2), (void **)&pIDXGIFactory3);
+	if (FAILED(hr)) goto done;
 
-		hr = m_pDXGIAdapter->EnumOutputs(0, &m_pDXGIOutput);
-		if (FAILED(hr)) return hr;
+	hr = pDXGIAdapter->EnumOutputs(0, &pDXGIOutput);
+	if (FAILED(hr)) goto done;
 
-		RECT rect;
-		GetClientRect(g_hwWnd, &rect);
+	RECT rect;
+	GetClientRect(hWnd, &rect);
 
-		DXGI_SWAP_CHAIN_DESC1 swapChainDesc;
-		memset(&swapChainDesc, 0, sizeof(swapChainDesc));
-		swapChainDesc.Width = rect.right - rect.left;
-		swapChainDesc.Height = rect.bottom - rect.top;
-		swapChainDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-		swapChainDesc.Stereo = FALSE;
-		swapChainDesc.SampleDesc.Count = 1;
-		swapChainDesc.SampleDesc.Quality = 0;
-		swapChainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-		swapChainDesc.BufferCount = 2;
-		//swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-		swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
-		swapChainDesc.Scaling = DXGI_SCALING_STRETCH;
-		//swapChainDesc.AlphaMode = DXGI_ALPHA_MODE::DXGI_ALPHA_MODE_IGNORE;
-		//swapChainDesc.Flags = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL; // DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
-		swapChainDesc.Flags = 0;
+	DXGI_SWAP_CHAIN_DESC1 swapChainDesc;
+	ZeroMemory(&swapChainDesc, sizeof(swapChainDesc));
+	swapChainDesc.Width = rect.right - rect.left;
+	swapChainDesc.Height = rect.bottom - rect.top;
+	swapChainDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+	swapChainDesc.Stereo = FALSE;
+	swapChainDesc.SampleDesc.Count = 1;
+	swapChainDesc.SampleDesc.Quality = 0;
+	swapChainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+	swapChainDesc.BufferCount = 2;
+	//swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+	swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+	swapChainDesc.Scaling = DXGI_SCALING_STRETCH;
+	//swapChainDesc.AlphaMode = DXGI_ALPHA_MODE::DXGI_ALPHA_MODE_IGNORE;
+	//swapChainDesc.Flags = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL; // DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+	swapChainDesc.Flags = 0;
 
-		hr = m_pIDXGIFactory3->CreateSwapChainForHwnd(m_pD3D11Device, g_hwWnd, &swapChainDesc, NULL, NULL, &m_swapChain1);
-		if (FAILED(hr)) return hr;
+	hr = pIDXGIFactory3->CreateSwapChainForHwnd(m_pD3D11Device, hWnd, &swapChainDesc, NULL, NULL, &pSwapChain1);
+	if (FAILED(hr)) goto done;
 
-		m_swapchain2 = (IDXGISwapChain2 *)m_swapChain1;
+	pSwapChain2 = (IDXGISwapChain2 *)pSwapChain1;
 
-		DXGI_SWAP_CHAIN_DESC1 swapChainDesc2;
-		m_swapChain1->GetDesc1(&swapChainDesc2);
-		
-		m_swapchain2->SetMaximumFrameLatency(1);
+	//DXGI_SWAP_CHAIN_DESC1 swapChainDesc2;
+	//pSwapChain1->GetDesc1(&swapChainDesc2);
 
-		//	IF_FAILED_THROW(m_swapchain2->SetFullscreenState(TRUE, NULL));//full screen
-		//ResizeSwapChain();
+	pSwapChain2->SetMaximumFrameLatency(1);
 
-		hr = m_swapchain2->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&pBackBuffer));
-		if (FAILED(hr)) return hr;
-			
-		// Create a render target view
-		hr = m_pD3D11Device->CreateRenderTargetView(pBackBuffer, nullptr, &m_pRenderTargetView);
-		pBackBuffer->Release();
-		if (FAILED(hr)) return hr;
+	//	IF_FAILED_THROW(m_swapchain2->SetFullscreenState(TRUE, NULL));//full screen
+	//ResizeSwapChain();
 
-		// Set new render target
-		m_pD3D11DeviceContext->OMSetRenderTargets(1, &m_pRenderTargetView, nullptr);
+	hr = pSwapChain2->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&pBackBuffer));
+	if (FAILED(hr)) goto done;
 
-		D3D11_VIEWPORT VP;
-		VP.Width = swapChainDesc.Width;
-		VP.Height = swapChainDesc.Height;
-		VP.MinDepth = 0.0f;
-		VP.MaxDepth = 1.0f;
-		VP.TopLeftX = 0;
-		VP.TopLeftY = 0;
-		m_pD3D11DeviceContext->RSSetViewports(1, &VP);
+	// Create a render target view
+	hr = m_pD3D11Device->CreateRenderTargetView(pBackBuffer, nullptr, &pRenderTargetView);
+	if (FAILED(hr)) goto done;
 
-	}
-	catch (HRESULT) {
+	// Set new render target
+	m_pD3D11DeviceContext->OMSetRenderTargets(1, &pRenderTargetView, nullptr);
 
-	}
+	D3D11_VIEWPORT VP;
+	VP.Width = swapChainDesc.Width;
+	VP.Height = swapChainDesc.Height;
+	VP.MinDepth = 0.0f;
+	VP.MaxDepth = 1.0f;
+	VP.TopLeftX = 0;
+	VP.TopLeftY = 0;
+	m_pD3D11DeviceContext->RSSetViewports(1, &VP);
+
+
+done:
+	if (FAILED(hr))
+		SAFE_RELEASE(pSwapChain1);
+
+	SAFE_RELEASE(pBackBuffer);
+	SAFE_RELEASE(pRenderTargetView);
+	SAFE_RELEASE(pDXGIOutput);
+	SAFE_RELEASE(pIDXGIFactory3);
+	SAFE_RELEASE(pDXGIAdapter);
+	SAFE_RELEASE(pDXGIdevice);
+
 	return hr;
 }
 
@@ -408,6 +421,7 @@ void d3d11va_retrieve_data(AVCodecContext *avctx, AVFrame *frame)
 	HRESULT hr = S_OK;
 	D3D11_TEXTURE2D_DESC texture_desc;
 	D3D11_TEXTURE2D_DESC bktexture_desc;
+	ID3D11RenderTargetView *pRenderTargetView = NULL;
 	ID3D11VideoProcessorInputView* pD3D11VideoProcessorInputViewIn = NULL;
 	ID3D11VideoProcessorOutputView* pD3D11VideoProcessorOutputView = NULL;
 	ID3D11Texture2D *pDXGIBackBuffer = NULL;
@@ -420,12 +434,12 @@ void d3d11va_retrieve_data(AVCodecContext *avctx, AVFrame *frame)
 
 	hwTexture->GetDesc(&texture_desc);
 
-	hr = m_swapchain2->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&pDXGIBackBuffer);
+	hr = pSwapChain2->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&pDXGIBackBuffer);
 	if (FAILED(hr)) return;
 
 	pDXGIBackBuffer->GetDesc(&bktexture_desc);
 
-#ifndef NDEBUG
+#if 1
 	RECT rect;
 	GetClientRect(g_hwWnd, &rect);
 
@@ -433,25 +447,51 @@ void d3d11va_retrieve_data(AVCodecContext *avctx, AVFrame *frame)
 	int h = rect.bottom - rect.top;
 
 	if (w != bktexture_desc.Width || h != bktexture_desc.Height) {	
-		hr = m_swapchain2->ResizeBuffers(
+		
+		//ResizeSwapChain();
+		hr = pSwapChain2->ResizeBuffers (
 			2,
-			w, h,
-			DXGI_FORMAT_UNKNOWN,
-			0);
-		//if (hr == DXGI_ERROR_DEVICE_REMOVED) {}
-		//else if (FAILED(hr)) return;
+			w,
+			h,
+			bktexture_desc.Format,
+			0
+		);
+		if (SUCCEEDED(hr))
+		{
+#if 1
+			pDXGIBackBuffer->GetDesc(&bktexture_desc);
+#else
+			bktexture_desc.Width = w;
+			bktexture_desc.Height = h;
+#endif
+			// Create a render target view
+			hr = m_pD3D11Device->CreateRenderTargetView(pDXGIBackBuffer, nullptr, &pRenderTargetView);
+			if (FAILED(hr)) goto done;
+
+			// Set new render target
+			m_pD3D11DeviceContext->OMSetRenderTargets(1, &pRenderTargetView, nullptr);
+
+			D3D11_VIEWPORT VP;
+			ZeroMemory(&VP, sizeof(VP));
+			VP.Width = bktexture_desc.Width;
+			VP.Height = bktexture_desc.Height;
+			VP.MinDepth = 0.0f;
+			VP.MaxDepth = 1.0f;
+			VP.TopLeftX = 0;
+			VP.TopLeftY = 0;
+			m_pD3D11DeviceContext->RSSetViewports(1, &VP);
+
+			SAFE_RELEASE(pRenderTargetView);
+			SAFE_RELEASE(m_pD3D11VideoProcessorEnumerator);
+			SAFE_RELEASE(m_pD3D11VideoProcessor);
+		}
 	}
 #endif
 
 	if (!m_pD3D11VideoProcessorEnumerator || !m_pD3D11VideoProcessor)
 	{
-		if (m_pD3D11VideoProcessorEnumerator)
-			m_pD3D11VideoProcessorEnumerator->Release();
-		if (m_pD3D11VideoProcessor)
-			m_pD3D11VideoProcessor->Release();
-
-		//SAFE_RELEASE(m_pD3D11VideoProcessorEnumerator);
-		//SAFE_RELEASE(m_pD3D11VideoProcessor);
+		SAFE_RELEASE(m_pD3D11VideoProcessorEnumerator);
+		SAFE_RELEASE(m_pD3D11VideoProcessor);
 
 		D3D11_VIDEO_PROCESSOR_CONTENT_DESC ContentDesc;
 		ZeroMemory(&ContentDesc, sizeof(ContentDesc));
@@ -515,7 +555,7 @@ void d3d11va_retrieve_data(AVCodecContext *avctx, AVFrame *frame)
 	pInDesc.Texture2D.ArraySlice = index;
 
 	hr = m_pD3D11VideoDevice->CreateVideoProcessorInputView(hwTexture, m_pD3D11VideoProcessorEnumerator, &pInDesc, &pD3D11VideoProcessorInputViewIn);
-	if (FAILED(hr)) return;
+	if (FAILED(hr)) goto done;
 
 	D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC pOutDesc;
 	ZeroMemory(&pOutDesc, sizeof(pOutDesc));
@@ -524,7 +564,7 @@ void d3d11va_retrieve_data(AVCodecContext *avctx, AVFrame *frame)
 	pOutDesc.Texture2D.MipSlice = 0;
 
 	hr = m_pD3D11VideoDevice->CreateVideoProcessorOutputView(pDXGIBackBuffer, m_pD3D11VideoProcessorEnumerator, &pOutDesc, &pD3D11VideoProcessorOutputView);
-	if (FAILED(hr)) return;
+	if (FAILED(hr)) goto done;
 
 	D3D11_VIDEO_PROCESSOR_STREAM StreamData;
 	ZeroMemory(&StreamData, sizeof(StreamData));
@@ -540,27 +580,22 @@ void d3d11va_retrieve_data(AVCodecContext *avctx, AVFrame *frame)
 	StreamData.ppFutureSurfacesRight = NULL;
 
 	hr = m_pD3D11VideoContext->VideoProcessorBlt(m_pD3D11VideoProcessor, pD3D11VideoProcessorOutputView, 0, 1, &StreamData);
-	if (FAILED(hr)) return;
+	if (FAILED(hr)) goto done;
 
 	DXGI_PRESENT_PARAMETERS parameters;
 	ZeroMemory(&parameters, sizeof(parameters));
 
-	if (m_swapchain2 != NULL)
+	if (pSwapChain2 != NULL)
 	{
 		//hr = m_swapchain2->Present1(0, DXGI_PRESENT_ALLOW_TEARING, &parameters);
-		m_swapchain2->Present1(0, DXGI_PRESENT_DO_NOT_WAIT, &parameters);
+		pSwapChain2->Present1(0, DXGI_PRESENT_DO_NOT_WAIT, &parameters);
 	}
 
-	//hwTexture->Release();
-	pD3D11VideoProcessorOutputView->Release();
-	pD3D11VideoProcessorInputViewIn->Release();
-	pDXGIBackBuffer->Release();
-
+done:
 	//SAFE_RELEASE(hwTexture);
-	//SAFE_RELEASE(_rtv);
-	//SAFE_RELEASE(pD3D11VideoProcessorOutputView);
-	//SAFE_RELEASE(pD3D11VideoProcessorInputViewIn);
-
+	SAFE_RELEASE(pD3D11VideoProcessorOutputView);
+	SAFE_RELEASE(pD3D11VideoProcessorInputViewIn);
+	SAFE_RELEASE(pDXGIBackBuffer);
 }
 
 #endif
@@ -616,7 +651,7 @@ static int hw_decoder_init(AVCodecContext *ctx, const enum AVHWDeviceType type)
 		m_pD3D11VideoDevice = d3d11_device_ctx->video_device;
 		m_pD3D11VideoContext = d3d11_device_ctx->video_context;
 
-		d3d11_init_display();
+		d3d11_init_display(g_hwWnd);
 	}
 #endif
 
