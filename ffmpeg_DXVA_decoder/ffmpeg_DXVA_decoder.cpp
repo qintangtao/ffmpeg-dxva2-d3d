@@ -326,7 +326,7 @@ static IDXGISwapChain2 *pSwapChain2 = NULL;
 static ID3D11VideoProcessorEnumerator *m_pD3D11VideoProcessorEnumerator = NULL;
 static ID3D11VideoProcessor *m_pD3D11VideoProcessor = NULL;
 
-static HRESULT d3d11_init_display(HWND hWnd)
+static HRESULT d3d11_init(HWND hWnd)
 {
 	HRESULT hr = S_OK;
 	IDXGIDevice1 *pDXGIdevice = NULL;
@@ -414,6 +414,13 @@ done:
 	SAFE_RELEASE(pDXGIdevice);
 
 	return hr;
+}
+
+static void d3d11_uninit()
+{
+	SAFE_RELEASE(m_pD3D11VideoProcessorEnumerator);
+	SAFE_RELEASE(m_pD3D11VideoProcessor);
+	SAFE_RELEASE(pSwapChain2);
 }
 
 void d3d11va_retrieve_data(AVCodecContext *avctx, AVFrame *frame)
@@ -651,7 +658,8 @@ static int hw_decoder_init(AVCodecContext *ctx, const enum AVHWDeviceType type)
 		m_pD3D11VideoDevice = d3d11_device_ctx->video_device;
 		m_pD3D11VideoContext = d3d11_device_ctx->video_context;
 
-		d3d11_init_display(g_hwWnd);
+		if (FAILED(d3d11_init(g_hwWnd)))
+			exit(EXIT_FAILURE);		
 	}
 #endif
 
@@ -894,6 +902,10 @@ DWORD WINAPI ThreadProc(_In_ LPVOID lpParameter)
 
 #if CONFIG_DXVA2
 	DeleteCriticalSection(&cs);
+#endif
+
+#if CONFIG_D3D11VA
+	d3d11_uninit();
 #endif
 
 	exit(EXIT_SUCCESS);
