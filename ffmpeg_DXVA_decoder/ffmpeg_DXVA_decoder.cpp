@@ -227,6 +227,249 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 	fprintf(stderr, "Failed to get HW surface format.\n");
 	return AV_PIX_FMT_NONE;
 }
+
+#if CONFIG_D3D11VA
+#include <d3d11.h>
+#include <dxgi.h>
+#include <dxgi1_3.h>
+
+static struct AVD3D11VADeviceContext *d3d11_device_ctx = NULL;
+static IDXGIDevice1 *m_pDXGIdevice = NULL;
+static IDXGIAdapter *m_pDXGIAdapter = NULL;
+static IDXGIFactory2 *m_pIDXGIFactory3 = NULL;
+static IDXGIOutput *m_pDXGIOutput = NULL;
+static IDXGISwapChain1 *m_swapChain1 = NULL;
+static IDXGISwapChain2 *m_swapchain2 = NULL;
+static ID3D11Texture2D* m_pBackBuffer2 = NULL;
+static ID3D11RenderTargetView *m_pRenderTargetView = NULL;
+static ID3D11VideoProcessorEnumerator *m_pD3D11VideoProcessorEnumerator = NULL;
+static ID3D11VideoProcessor *m_pD3D11VideoProcessor = NULL;
+
+static HRESULT d3d11_init_display()
+{
+	HRESULT hr = S_OK;
+
+	if (!d3d11_device_ctx)
+		return S_FALSE;
+
+	try {
+		hr = d3d11_device_ctx->device->QueryInterface(__uuidof(IDXGIDevice1), (void**)&m_pDXGIdevice);
+		if (FAILED(hr)) return hr;
+
+		hr = m_pDXGIdevice->GetParent(__uuidof(IDXGIAdapter), (void **)&m_pDXGIAdapter);
+		if (FAILED(hr)) return hr;
+
+		hr = m_pDXGIAdapter->GetParent(__uuidof(IDXGIFactory2), (void **)&m_pIDXGIFactory3);
+		if (FAILED(hr)) return hr;
+
+		hr = m_pDXGIAdapter->EnumOutputs(0, &m_pDXGIOutput);
+		if (FAILED(hr)) return hr;
+
+		RECT rect;
+		GetClientRect(g_hwWnd, &rect);
+
+
+		DXGI_SWAP_CHAIN_DESC1 swapChainDesc;
+		memset(&swapChainDesc, 0, sizeof(swapChainDesc));
+		swapChainDesc.Width = rect.right - rect.left;
+		swapChainDesc.Height = rect.bottom - rect.top;
+		swapChainDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+		swapChainDesc.Stereo = FALSE;
+		swapChainDesc.SampleDesc.Count = 1;
+		swapChainDesc.SampleDesc.Quality = 0;
+		swapChainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+		swapChainDesc.BufferCount = 2;
+		//swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+		swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+		swapChainDesc.Scaling = DXGI_SCALING_STRETCH;
+		//swapChainDesc.AlphaMode = DXGI_ALPHA_MODE::DXGI_ALPHA_MODE_IGNORE;
+		//swapChainDesc.Flags = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL; // DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+		swapChainDesc.Flags = 0;
+
+		hr = m_pIDXGIFactory3->CreateSwapChainForHwnd(d3d11_device_ctx->device, g_hwWnd, &swapChainDesc, NULL, NULL, &m_swapChain1);
+		if (FAILED(hr)) return hr;
+
+		m_swapchain2 = (IDXGISwapChain2 *)m_swapChain1;
+
+		DXGI_SWAP_CHAIN_DESC1 swapChainDesc2;
+		m_swapChain1->GetDesc1(&swapChainDesc2);
+		
+		m_swapchain2->SetMaximumFrameLatency(1);
+
+		//	IF_FAILED_THROW(m_swapchain2->SetFullscreenState(TRUE, NULL));//full screen
+		//ResizeSwapChain();
+
+		hr = m_swapchain2->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&m_pBackBuffer2));
+		if (FAILED(hr)) return hr;
+			
+		// Create a render target view
+		hr = d3d11_device_ctx->device->CreateRenderTargetView(m_pBackBuffer2, nullptr, &m_pRenderTargetView);
+		m_pBackBuffer2->Release();
+		if (FAILED(hr)) return hr;
+
+		// Set new render target
+		d3d11_device_ctx->device_context->OMSetRenderTargets(1, &m_pRenderTargetView, nullptr);
+
+		D3D11_VIEWPORT VP;
+		VP.Width = swapChainDesc.Width;
+		VP.Height = swapChainDesc.Height;
+		VP.MinDepth = 0.0f;
+		VP.MaxDepth = 1.0f;
+		VP.TopLeftX = 0;
+		VP.TopLeftY = 0;
+		d3d11_device_ctx->device_context->RSSetViewports(1, &VP);
+
+	}
+	catch (HRESULT) {
+
+	}
+	return hr;
+}
+
+void d3d11va_retrieve_data(AVCodecContext *avctx, AVFrame *frame)
+{
+	HRESULT hr = S_OK;
+	D3D11_TEXTURE2D_DESC texture_desc;
+	D3D11_TEXTURE2D_DESC bktexture_desc;
+	ID3D11VideoProcessorInputView* pD3D11VideoProcessorInputViewIn = NULL;
+	ID3D11VideoProcessorOutputView* pD3D11VideoProcessorOutputView = NULL;
+	ID3D11Texture2D *m_pDXGIBackBuffer = NULL;
+	if (frame == NULL)
+		return;
+
+	int index = (intptr_t)frame->data[1];
+	if (frame->format == AV_PIX_FMT_D3D11)
+	{
+		ID3D11Texture2D* hwTexture = (ID3D11Texture2D*)frame->data[0];
+		hwTexture->GetDesc(&texture_desc);
+
+		hr = m_swapchain2->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&m_pDXGIBackBuffer);
+		if (FAILED(hr)) return;
+
+		m_pDXGIBackBuffer->GetDesc(&bktexture_desc);
+
+		if (!m_pD3D11VideoProcessorEnumerator || !m_pD3D11VideoProcessor)
+		{
+			if (m_pD3D11VideoProcessorEnumerator)
+				m_pD3D11VideoProcessorEnumerator->Release();
+			if (m_pD3D11VideoProcessor)
+				m_pD3D11VideoProcessor->Release();
+
+			//SAFE_RELEASE(m_pD3D11VideoProcessorEnumerator);
+			//SAFE_RELEASE(m_pD3D11VideoProcessor);
+
+			D3D11_VIDEO_PROCESSOR_CONTENT_DESC ContentDesc;
+			ZeroMemory(&ContentDesc, sizeof(ContentDesc));
+			ContentDesc.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
+			ContentDesc.InputWidth = texture_desc.Width;
+			ContentDesc.InputHeight = texture_desc.Height;
+			ContentDesc.OutputWidth = bktexture_desc.Width;
+			ContentDesc.OutputHeight = bktexture_desc.Height;
+			ContentDesc.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
+			hr = d3d11_device_ctx->video_device->CreateVideoProcessorEnumerator(&ContentDesc, &m_pD3D11VideoProcessorEnumerator);
+			if (FAILED(hr)) return;
+
+			UINT uiFlags;
+			DXGI_FORMAT VP_Output_Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+			hr = m_pD3D11VideoProcessorEnumerator->CheckVideoProcessorFormat(VP_Output_Format, &uiFlags);
+			if (FAILED(hr)) return;
+
+			DXGI_FORMAT VP_input_Format = texture_desc.Format;
+			hr = m_pD3D11VideoProcessorEnumerator->CheckVideoProcessorFormat(VP_input_Format, &uiFlags);
+			if (FAILED(hr)) return;
+
+			//  NV12 surface to RGB backbuffer
+			RECT srcrc = { 0, 0, (LONG)texture_desc.Width, (LONG)texture_desc.Height };
+			RECT destcrc = { 0, 0, (LONG)bktexture_desc.Width, (LONG)bktexture_desc.Height };
+
+			hr = d3d11_device_ctx->video_device->CreateVideoProcessor(m_pD3D11VideoProcessorEnumerator, 0, &m_pD3D11VideoProcessor);
+			if (FAILED(hr)) return;
+
+			d3d11_device_ctx->video_context->VideoProcessorSetStreamFrameFormat(m_pD3D11VideoProcessor, 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
+			d3d11_device_ctx->video_context->VideoProcessorSetStreamOutputRate(m_pD3D11VideoProcessor, 0, D3D11_VIDEO_PROCESSOR_OUTPUT_RATE_NORMAL, TRUE, NULL);
+
+			d3d11_device_ctx->video_context->VideoProcessorSetStreamSourceRect(m_pD3D11VideoProcessor, 0, TRUE, &srcrc);
+			d3d11_device_ctx->video_context->VideoProcessorSetStreamDestRect(m_pD3D11VideoProcessor, 0, TRUE, &destcrc);
+			d3d11_device_ctx->video_context->VideoProcessorSetOutputTargetRect(m_pD3D11VideoProcessor, TRUE, &destcrc);
+
+
+			D3D11_VIDEO_COLOR color;
+			color.YCbCr = { 0.0625f, 0.5f, 0.5f, 0.5f }; // black color
+			d3d11_device_ctx->video_context->VideoProcessorSetOutputBackgroundColor(m_pD3D11VideoProcessor, TRUE, &color);
+
+		}
+
+		//        IF_FAILED_THROW(m_pD3D11Device->CreateRenderTargetView(m_pDXGIBackBuffer, nullptr, &_rtv));
+		//        D3D11_VIEWPORT VP;
+		//        ZeroMemory(&VP, sizeof(VP));
+		//        VP.Width = bktexture_desc.Width;
+		//        VP.Height = bktexture_desc.Height;
+		//        VP.MinDepth = 0.0f;
+		//        VP.MaxDepth = 1.0f;
+		//        VP.TopLeftX = 0;
+		//        VP.TopLeftY = 0;
+		//        m_pD3D11DeviceContext->RSSetViewports(1, &VP);
+
+		D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC pInDesc;
+		ZeroMemory(&pInDesc, sizeof(pInDesc));
+		D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC InputViewDesc;
+
+		pInDesc.FourCC = 0;
+		pInDesc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+		pInDesc.Texture2D.MipSlice = 0;
+		pInDesc.Texture2D.ArraySlice = index;
+
+		hr = d3d11_device_ctx->video_device->CreateVideoProcessorInputView(hwTexture, m_pD3D11VideoProcessorEnumerator, &pInDesc, &pD3D11VideoProcessorInputViewIn);
+		if (FAILED(hr)) return;
+
+		D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC pOutDesc;
+		ZeroMemory(&pOutDesc, sizeof(pOutDesc));
+
+		pOutDesc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
+		pOutDesc.Texture2D.MipSlice = 0;
+
+		hr = d3d11_device_ctx->video_device->CreateVideoProcessorOutputView(m_pDXGIBackBuffer, m_pD3D11VideoProcessorEnumerator, &pOutDesc, &pD3D11VideoProcessorOutputView);
+		if (FAILED(hr)) return;
+
+		D3D11_VIDEO_PROCESSOR_STREAM StreamData;
+		ZeroMemory(&StreamData, sizeof(StreamData));
+		StreamData.Enable = TRUE;
+		StreamData.OutputIndex = 0;
+		StreamData.InputFrameOrField = 0;
+		StreamData.PastFrames = 0;
+		StreamData.FutureFrames = 0;
+		StreamData.ppPastSurfaces = NULL;
+		StreamData.ppFutureSurfaces = NULL;
+		StreamData.pInputSurface = pD3D11VideoProcessorInputViewIn;
+		StreamData.ppPastSurfacesRight = NULL;
+		StreamData.ppFutureSurfacesRight = NULL;
+
+		hr = d3d11_device_ctx->video_context->VideoProcessorBlt(m_pD3D11VideoProcessor, pD3D11VideoProcessorOutputView, 0, 1, &StreamData);
+		if (FAILED(hr)) return;
+
+		DXGI_PRESENT_PARAMETERS parameters;
+		ZeroMemory(&parameters, sizeof(parameters));
+
+		if (m_swapchain2 != NULL)
+		{
+			//hr = m_swapchain2->Present1(0, DXGI_PRESENT_ALLOW_TEARING, &parameters);
+			m_swapchain2->Present1(0, DXGI_PRESENT_DO_NOT_WAIT, &parameters);
+		}
+
+		pD3D11VideoProcessorOutputView->Release();
+		pD3D11VideoProcessorInputViewIn->Release();
+
+		//SAFE_RELEASE(hwTexture);
+		//SAFE_RELEASE(_rtv);
+		//SAFE_RELEASE(pD3D11VideoProcessorOutputView);
+		//SAFE_RELEASE(pD3D11VideoProcessorInputViewIn);
+
+	}
+
+}
+
+#endif
+
 static int hw_decoder_init(AVCodecContext *ctx, const enum AVHWDeviceType type)
 {
 	AVDictionary *opts = NULL;
@@ -249,6 +492,14 @@ static int hw_decoder_init(AVCodecContext *ctx, const enum AVHWDeviceType type)
 		return err;
 	}
 	ctx->hw_device_ctx = av_buffer_ref(hw_device_ctx);
+
+#if CONFIG_D3D11VA
+	if (type == AV_HWDEVICE_TYPE_D3D11VA) {
+		AVHWDeviceContext* hw_device_ctx = (AVHWDeviceContext*)ctx->hw_device_ctx->data;
+		d3d11_device_ctx = (AVD3D11VADeviceContext*)hw_device_ctx->hwctx;
+		d3d11_init_display();
+	}
+#endif
 
 	av_dict_free(&opts);
 	return err;
@@ -406,6 +657,10 @@ static int decode_write(AVCodecContext *avctx, AVPacket *packet)
 #ifndef ENABLED_SAVE_FILE
 		if (frame->format == AV_PIX_FMT_DXVA2_VLD)
 			dxva2_retrieve_data(avctx, frame);
+#if CONFIG_D3D11VA
+		else if (frame->format == AV_PIX_FMT_D3D11)
+			d3d11va_retrieve_data(avctx, frame);
+#endif
 
 		av_usleep(30000);
 #else
@@ -523,8 +778,8 @@ DWORD WINAPI ThreadProc(_In_ LPVOID lpParameter)
 	if (avcodec_parameters_to_context(codecctx, fc->streams[videoindex]->codecpar) < 0)
 		exit(EXIT_FAILURE);
 
-	type = av_hwdevice_find_type_by_name("dxva2");
-	//type = av_hwdevice_find_type_by_name("d3d11va");
+	//type = av_hwdevice_find_type_by_name("dxva2");
+	type = av_hwdevice_find_type_by_name("d3d11va");
 	
 	if (type == AV_HWDEVICE_TYPE_NONE)
 		exit(EXIT_FAILURE);
